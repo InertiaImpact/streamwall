@@ -157,6 +157,9 @@ export type ControlCommand =
   | { type: 'save-layout'; slot: number; name: string; gridId?: string }
   | { type: 'load-layout'; slot: number; gridId?: string }
   | { type: 'clear-layout'; slot: number; gridId?: string }
+  | { type: 'export-layout-slot'; slot: number; gridId?: string }
+  | { type: 'export-layouts'; gridId?: string }
+  | { type: 'import-layouts'; gridId?: string }
   | { type: 'spotlight'; url: string; gridId?: string }
 
 export type ControlUpdate = {

@@ -23,6 +23,8 @@ import {
   FaSearch,
   FaSyncAlt,
   FaTimes,
+  FaDownload,
+  FaUpload,
   FaVideoSlash,
   FaVolumeUp,
 } from 'react-icons/fa'
@@ -1036,6 +1038,22 @@ export function ControlUI({
     [send, activeGridId],
   )
 
+  const handleExportAllLayouts = useCallback(() => {
+    // Cast to any to allow sending commands not yet in ControlCommand union
+    send({ type: 'export-layouts', gridId: activeGridId ?? undefined } as any)
+  }, [send, activeGridId])
+
+  const handleImportLayouts = useCallback(() => {
+    send({ type: 'import-layouts', gridId: activeGridId ?? undefined } as any)
+  }, [send, activeGridId])
+
+  const handleExportLayoutSlot = useCallback(
+    (slot: number) => {
+      send({ type: 'export-layout-slot', slot, gridId: activeGridId ?? undefined } as any)
+    },
+    [send, activeGridId],
+  )
+
   const handleClickId = useCallback(
     (streamId: string) => {
       if (cols == null || rows == null || sharedState == null) {
@@ -1745,6 +1763,9 @@ export function ControlUI({
                   onSave={handleSaveLayout}
                   onLoad={handleLoadLayout}
                   onClear={handleClearLayout}
+                  onExportSlot={handleExportLayoutSlot}
+                  onExportAll={handleExportAllLayouts}
+                  onImport={handleImportLayouts}
                   rowsToShow={layoutCollapsed ? 2 : 11}
                 />
               </div>
@@ -2458,6 +2479,9 @@ function FixedLayoutGrid({
   onSave,
   onLoad,
   onClear,
+  onExportSlot,
+  onExportAll,
+  onImport,
   rowsToShow = 11,
 }: {
   savedLayouts?: Record<string, { 
@@ -2469,29 +2493,49 @@ function FixedLayoutGrid({
   onSave: (slot: number, name: string) => void
   onLoad: (slot: number) => void
   onClear: (slot: number) => void
+  onExportSlot: (slot: number) => void
+  onExportAll: () => void
+  onImport: () => void
   rowsToShow?: number
 }) {
   // Fixed 4x11 grid (44 total slots), show specified number of rows
   const GRID_COLS = 4
-  const GRID_ROWS = 11
-  const totalSlots = GRID_COLS * GRID_ROWS
   const slotsToDisplay = GRID_COLS * rowsToShow
-  
+
   const slotsToShow = Array.from({ length: slotsToDisplay }, (_, i) => i + 1)
-  
+
   return (
-    <StyledLayoutPresetGrid>
-      {slotsToShow.map(slotNum => (
-        <LayoutPresetCard
-          key={slotNum}
-          slot={slotNum}
-          savedLayout={savedLayouts?.[`slot${slotNum}`]}
-          onSave={onSave}
-          onLoad={onLoad}
-          onClear={onClear}
-        />
-      ))}
-    </StyledLayoutPresetGrid>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-start' }}>
+        <button
+          onClick={onExportAll}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
+          title="Export all layouts"
+        >
+          <FaDownload /> Export all
+        </button>
+        <button
+          onClick={onImport}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
+          title="Import layouts from file"
+        >
+          <FaUpload /> Import
+        </button>
+      </div>
+      <StyledLayoutPresetGrid>
+        {slotsToShow.map((slotNum) => (
+          <LayoutPresetCard
+            key={slotNum}
+            slot={slotNum}
+            savedLayout={savedLayouts?.[`slot${slotNum}`]}
+            onSave={onSave}
+            onLoad={onLoad}
+            onClear={onClear}
+            onExport={() => onExportSlot(slotNum)}
+          />
+        ))}
+      </StyledLayoutPresetGrid>
+    </div>
   )
 }
 
@@ -2501,6 +2545,7 @@ function LayoutPresetCard({
   onSave,
   onLoad,
   onClear,
+  onExport,
 }: {
   slot: number
   savedLayout?: { 
@@ -2512,6 +2557,7 @@ function LayoutPresetCard({
   onSave: (slot: number, name: string) => void
   onLoad: (slot: number) => void
   onClear: (slot: number) => void
+  onExport: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
   const [name, setName] = useState('')
@@ -2545,6 +2591,10 @@ function LayoutPresetCard({
       onClear(slot)
     }
   }, [savedLayout, slot, onClear])
+
+  const handleExportClick = useCallback(() => {
+    onExport()
+  }, [onExport])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -2629,6 +2679,14 @@ function LayoutPresetCard({
           >
             💾
           </StyledLayoutCardButton>
+          {savedLayout && (
+            <StyledLayoutCardButton
+              onClick={handleExportClick}
+              title={`Export ${savedLayout.name}`}
+            >
+              ⬇️
+            </StyledLayoutCardButton>
+          )}
           {savedLayout && (
             <StyledLayoutCardButton
               className="delete"

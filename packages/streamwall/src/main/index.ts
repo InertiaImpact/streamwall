@@ -1,6 +1,6 @@
 import TOML from '@iarna/toml'
 import * as Sentry from '@sentry/electron/main'
-import { BrowserWindow, app, ipcMain, session, shell } from 'electron'
+import { BrowserWindow, app, dialog, ipcMain, session, shell } from 'electron'
 import runControlServer from 'streamwall-control-server'
 import started from 'electron-squirrel-startup'
 import fs from 'fs'
@@ -481,7 +481,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
         delete (cleanedConfig.window as any).grids
 
         const serializableConfig = pruneUndefined(cleanedConfig)
-        fs.writeFileSync(configPath, TOML.stringify(serializableConfig))
+        fs.writeFileSync(configPath, TOML.stringify(serializableConfig as any))
         console.log('[wizard] Saved config to', configPath)
         resolve({ launch: !!payload.launch })
       } catch (err) {
@@ -705,12 +705,14 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   const gridBaseCount = Math.max(1, Math.min(argv.grid.count ?? 1, 6))
   const windowPositions = argv.grid.positions ?? argv.grid.window
   const windowGridPositions = argv.window.grids
-  const gridConfigs =
+  const gridConfigs: GridInstanceConfig[] =
     argv.grid.instances && argv.grid.instances.length > 0
       ? argv.grid.instances
-      : Array.from({ length: gridBaseCount }, (_, idx) => ({
+      : Array.from({ length: gridBaseCount }, (_, idx): GridInstanceConfig => ({
           id: `grid-${idx + 1}`,
           index: idx + 1,
+          cols: argv.grid.cols,
+          rows: argv.grid.rows,
         }))
 
   const desiredCount = Math.max(1, gridBaseCount)
@@ -914,7 +916,13 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     }
   })
 
-  const onCommand = async (msg: ControlCommand) => {
+  type ExtendedControlCommand =
+    | ControlCommand
+    | { type: 'export-layout-slot'; slot: number; gridId?: string }
+    | { type: 'export-layouts'; gridId?: string }
+    | { type: 'import-layouts'; gridId?: string }
+
+  const onCommand = async (msg: ExtendedControlCommand) => {
     if (!msg || typeof msg !== 'object' || typeof (msg as any).type !== 'string') {
       console.warn('Ignoring command with missing type', msg)
       return
@@ -1120,6 +1128,31 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         console.debug('Layout cleared successfully')
         break
       }
+      case 'export-layout-slot': {
+        const slotKey = `slot${msg.slot}`
+        if (!db.data.savedLayouts?.[slotKey]) {
+          console.warn('[layouts] no layout found for', slotKey)
+          break
+        }
+        await exportLayoutsToFile(db.data.savedLayouts, slotKey)
+        break
+      }
+      case 'export-layouts': {
+        if (!db.data.savedLayouts || Object.keys(db.data.savedLayouts).length === 0) {
+          console.warn('[layouts] nothing to export')
+          break
+        }
+        await exportLayoutsToFile(db.data.savedLayouts)
+        break
+      }
+      case 'import-layouts': {
+        try {
+          await importLayoutsFromFile()
+        } catch (err) {
+          console.warn('[layouts] failed to import', err)
+        }
+        break
+      }
       case 'spotlight':
         console.debug('Spotlighting stream:', msg.url)
         console.debug('Calling grid spotlight with URL:', msg.url)
@@ -1131,6 +1164,65 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   }
 
   const stateEmitter = new EventEmitter<{ state: [StreamwallState] }>()
+
+  async function exportLayoutsToFile(layouts: Record<string, any>, singleSlot?: string) {
+    const defaultName = singleSlot ? `streamwall-layout-${singleSlot}.json` : 'streamwall-layouts.json'
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Export layouts',
+      defaultPath: join(app.getPath('documents'), defaultName),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (canceled || !filePath) {
+      return
+    }
+    const payload = singleSlot ? { [singleSlot]: layouts[singleSlot] } : layouts
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8')
+    console.log('[layouts] exported to', filePath)
+  }
+
+  async function importLayoutsFromFile() {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Import layouts',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (canceled || !filePaths?.[0]) {
+      return
+    }
+    const raw = fs.readFileSync(filePaths[0], 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Invalid layout file')
+    }
+    const incoming = parsed as Record<string, any>
+    db.update((data) => {
+      if (!data.savedLayouts) {
+        data.savedLayouts = {}
+      }
+      for (const [slotKey, value] of Object.entries(incoming)) {
+        if (value && typeof value === 'object' && value.stateDoc) {
+          data.savedLayouts[slotKey] = value as any
+        }
+      }
+    })
+
+    const nextSavedLayouts = db.data.savedLayouts
+      ? Object.fromEntries(
+          Object.entries(db.data.savedLayouts).map(([key, value]) => [
+            key,
+            {
+              name: (value as any).name,
+              timestamp: (value as any).timestamp,
+              gridSize: (value as any).gridSize,
+              gridId: (value as any).gridId,
+            },
+          ]),
+        )
+      : undefined
+
+    updateState({ savedLayouts: nextSavedLayouts })
+    console.log('[layouts] imported from', filePaths[0])
+  }
 
   function updateState(newState: Partial<StreamwallState>) {
     const grids = gridRuntimes.map((grid) => ({
@@ -1261,7 +1353,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           return
         }
 
-        onCommand(msg as ControlCommand)
+        onCommand(msg as ExtendedControlCommand)
       }
     })
     stateEmitter.on('state', () => {
