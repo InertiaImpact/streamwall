@@ -6,7 +6,7 @@ import started from 'electron-squirrel-startup'
 import fs from 'fs'
 import { throttle } from 'lodash-es'
 import EventEmitter from 'node:events'
-import { join, isAbsolute } from 'node:path'
+import { join, isAbsolute, dirname } from 'node:path'
 import ReconnectingWebSocket from 'reconnecting-websocket'
 import 'source-map-support/register'
 import { ControlCommand, StreamwallState, ViewState } from 'streamwall-shared'
@@ -916,11 +916,15 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     }
   })
 
+  let tomlFiles: string[] = []
+
   type ExtendedControlCommand =
     | ControlCommand
     | { type: 'export-layout-slot'; slot: number; gridId?: string }
     | { type: 'export-layouts'; gridId?: string }
     | { type: 'import-layouts'; gridId?: string }
+    | { type: 'export-streams-toml' }
+    | { type: 'import-streams-toml' }
 
   const onCommand = async (msg: ExtendedControlCommand) => {
     if (!msg || typeof msg !== 'object' || typeof (msg as any).type !== 'string') {
@@ -1031,6 +1035,14 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         console.debug('Refreshing errored views sequentially...')
         getGridRuntime(msg.gridId).window.refreshErroredViewsSequentially()
         break
+      case 'export-streams-toml': {
+        await exportStreamsToml()
+        break
+      }
+      case 'import-streams-toml': {
+        await importStreamsToml()
+        break
+      }
       case 'save-layout': {
         console.debug('Saving layout to slot:', msg.slot, 'with name:', msg.name)
         const targetGrid = getGridRuntime(msg.gridId)
@@ -1224,6 +1236,40 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     console.log('[layouts] imported from', filePaths[0])
   }
 
+  async function exportStreamsToml() {
+    const sourcePath = tomlFiles[0] ?? join(app.getPath('userData'), 'streams.toml')
+    if (!fs.existsSync(sourcePath)) {
+      console.warn('[streams] no streams.toml found at', sourcePath)
+      return
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Export streams.toml',
+      defaultPath: join(app.getPath('documents'), 'streams.toml'),
+      filters: [{ name: 'TOML', extensions: ['toml'] }],
+    })
+    if (canceled || !filePath) {
+      return
+    }
+    fs.copyFileSync(sourcePath, filePath)
+    console.log('[streams] exported streams.toml to', filePath)
+  }
+
+  async function importStreamsToml() {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Import streams.toml',
+      properties: ['openFile'],
+      filters: [{ name: 'TOML', extensions: ['toml'] }],
+    })
+    if (canceled || !filePaths?.[0]) {
+      return
+    }
+
+    const targetPath = tomlFiles[0] ?? join(app.getPath('userData'), 'streams.toml')
+    fs.mkdirSync(dirname(targetPath), { recursive: true })
+    fs.copyFileSync(filePaths[0], targetPath)
+    console.log('[streams] imported streams.toml to', targetPath)
+  }
+
   function updateState(newState: Partial<StreamwallState>) {
     const grids = gridRuntimes.map((grid) => ({
       id: grid.id,
@@ -1401,7 +1447,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   // Use default streams.toml from userData if no explicit data sources configured
   const tomlFilesRaw = argv.data['toml-file']
-  const tomlFiles = (tomlFilesRaw.length > 0
+  tomlFiles = (tomlFilesRaw.length > 0
     ? tomlFilesRaw
     : [join(app.getPath('userData'), 'streams.toml')]
   ).map((p) => (isAbsolute(p) ? p : join(app.getPath('userData'), p)))

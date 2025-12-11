@@ -8,7 +8,7 @@
     "build": "vite build"
   },
   "repository": "github:streamwall/streamwall",
-  "author": "Max Goodhart <c@chromakode.com>",
+  "author": "Brent Sancken",
   "license": "MIT",
   "dependencies": {
     "@preact/preset-vite": "^2.10.1",

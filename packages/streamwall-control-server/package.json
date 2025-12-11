@@ -8,7 +8,7 @@
     "start": "tsx ./src/index.ts"
   },
   "repository": "github:streamwall/streamwall",
-  "author": "Max Goodhart <c@chromakode.com>",
+  "author": "Brent Sancken",
   "license": "MIT",
   "dependencies": {
     "@fastify/cookie": "^11.0.2",

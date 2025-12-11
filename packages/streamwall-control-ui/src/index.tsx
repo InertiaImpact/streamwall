@@ -1054,6 +1054,14 @@ export function ControlUI({
     [send, activeGridId],
   )
 
+  const handleExportStreamsToml = useCallback(() => {
+    send({ type: 'export-streams-toml' })
+  }, [send])
+
+  const handleImportStreamsToml = useCallback(() => {
+    send({ type: 'import-streams-toml' })
+  }, [send])
+
   const handleClickId = useCallback(
     (streamId: string) => {
       if (cols == null || rows == null || sharedState == null) {
@@ -1719,6 +1727,22 @@ export function ControlUI({
                 roleCan(role, 'delete-custom-stream') && (
                   <>
                     <h2>Custom Streams</h2>
+                    <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                      <button
+                        onClick={handleExportStreamsToml}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
+                        title="Export the current streams.toml file"
+                      >
+                        <FaDownload /> Export streams.toml
+                      </button>
+                      <button
+                        onClick={handleImportStreamsToml}
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
+                        title="Import and replace streams.toml"
+                      >
+                        <FaUpload /> Import streams.toml
+                      </button>
+                    </div>
                     <div>
                       {customStreams.map(({ link, label, kind }, idx) => (
                         <CustomStreamInput

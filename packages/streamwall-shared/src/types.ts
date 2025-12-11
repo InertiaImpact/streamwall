@@ -160,6 +160,8 @@ export type ControlCommand =
   | { type: 'export-layout-slot'; slot: number; gridId?: string }
   | { type: 'export-layouts'; gridId?: string }
   | { type: 'import-layouts'; gridId?: string }
+  | { type: 'export-streams-toml' }
+  | { type: 'import-streams-toml' }
   | { type: 'spotlight'; url: string; gridId?: string }
 
 export type ControlUpdate = {
