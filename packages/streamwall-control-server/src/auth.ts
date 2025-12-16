@@ -70,6 +70,8 @@ export class StateWrapper extends EventEmitter {
       streamdelay,
       savedLayouts,
       grids,
+      overlayLabelFontSize,
+      refreshSchedule,
     } = this._value
 
     const state: StreamwallState = {
@@ -83,6 +85,9 @@ export class StateWrapper extends EventEmitter {
       streamdelay,
       savedLayouts,
       grids,
+      overlayLabelFontSize,
+      refreshSchedule,
+      uiState: (this._value as any).uiState,
     }
     if (role === 'admin') {
       state.auth = auth

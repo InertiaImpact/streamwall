@@ -244,6 +244,8 @@ export function useStreamwallState(state: StreamwallState | undefined) {
         savedLayouts: undefined,
         grids: [],
         defaultGridId: null,
+        overlayLabelFontSize: 16,
+        refreshSchedule: { enabled: false, time: '02:00' },
       }
     }
 
@@ -257,6 +259,8 @@ export function useStreamwallState(state: StreamwallState | undefined) {
       streamdelay,
       savedLayouts,
       grids,
+      overlayLabelFontSize,
+      refreshSchedule,
     } = state
 
     const buildViewInfo = (viewStates: ViewState[]) => {
@@ -315,6 +319,8 @@ export function useStreamwallState(state: StreamwallState | undefined) {
       savedLayouts,
       grids: enhancedGrids,
       defaultGridId: state.grids?.[0]?.id ?? enhancedGrids[0]?.id ?? null,
+      overlayLabelFontSize,
+      refreshSchedule,
     }
   }, [state])
 }
@@ -665,6 +671,8 @@ export function ControlUI({
     role,
     grids,
     defaultGridId,
+    overlayLabelFontSize: stateFontSize,
+    refreshSchedule: stateRefreshSchedule,
   } = connection
   const [activeGridId, setActiveGridId] = useState<string | null>(
     defaultGridId ?? (grids && grids[0]?.id) ?? null,
@@ -723,6 +731,40 @@ export function ControlUI({
   const handleRefreshErroredViews = useCallback(() => {
     send({ type: 'refresh-errored-views', gridId: activeGridId ?? undefined })
   }, [send, activeGridId])
+
+  const refreshSchedule = stateRefreshSchedule ?? sharedState?.refreshSchedule ?? { enabled: false, time: '02:00' }
+  const [scheduledTime, setScheduledTime] = useState(refreshSchedule.time)
+  const [scheduleEnabled, setScheduleEnabled] = useState(refreshSchedule.enabled)
+  const labelFontSize = stateFontSize ?? sharedState?.overlayLabelFontSize ?? 16
+  const [localFontSize, setLocalFontSize] = useState<number>(labelFontSize)
+
+  useEffect(() => {
+    setLocalFontSize(labelFontSize)
+  }, [labelFontSize])
+
+  useEffect(() => {
+    setScheduledTime(refreshSchedule.time)
+    setScheduleEnabled(refreshSchedule.enabled)
+  }, [refreshSchedule.enabled, refreshSchedule.time])
+
+  const handleLabelFontChange = useCallback((delta: number) => {
+    const base = Number.isFinite(localFontSize) ? localFontSize : labelFontSize
+    const next = Math.max(8, Math.min(48, Math.round(base + delta)))
+    setLocalFontSize(next)
+    send({ type: 'set-label-font-size', fontSize: next } as any)
+  }, [localFontSize, labelFontSize, send])
+
+  const handleScheduleToggle = useCallback(() => {
+    const nextEnabled = !scheduleEnabled
+    setScheduleEnabled(nextEnabled)
+    send({ type: 'set-refresh-schedule', enabled: nextEnabled, time: scheduledTime } as any)
+  }, [scheduleEnabled, scheduledTime, send])
+
+  const handleScheduleTimeChange = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
+    const next = (e.currentTarget.value || '02:00').slice(0, 5)
+    setScheduledTime(next)
+    send({ type: 'set-refresh-schedule', enabled: scheduleEnabled, time: next } as any)
+  }, [scheduleEnabled, send])
 
   const loopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
   const toggleLoopRefreshErrored = useCallback(() => {
@@ -1689,6 +1731,46 @@ export function ControlUI({
                 </div>
               )}
               
+              {roleCan(role, 'refresh-all-views') && (
+                <div style={{ marginTop: '8px', display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
+                      <input
+                        type="checkbox"
+                        checked={scheduleEnabled}
+                        onChange={handleScheduleToggle}
+                        style={{ margin: 0 }}
+                      />
+                      Auto refresh all at
+                    </label>
+                    <input
+                      type="time"
+                      value={scheduledTime}
+                      onChange={handleScheduleTimeChange}
+                      style={{ padding: '4px 6px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '12px' }}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <span style={{ fontSize: '12px', color: '#333' }}>Label size</span>
+                    <button
+                      onClick={() => handleLabelFontChange(-2)}
+                      style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
+                      title="Decrease label font size"
+                    >
+                      -
+                    </button>
+                    <span style={{ fontSize: '12px', minWidth: '32px', textAlign: 'center' }}>{labelFontSize}px</span>
+                    <button
+                      onClick={() => handleLabelFontChange(2)}
+                      style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
+                      title="Increase label font size"
+                    >
+                      +
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {/* Quick Spot Buttons */}
               <div style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                 <span style={{ fontWeight: 'bold', fontSize: '12px', marginRight: '8px' }}>Placeholders:</span>

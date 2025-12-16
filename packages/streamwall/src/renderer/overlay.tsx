@@ -31,7 +31,8 @@ function Overlay({
   config,
   views,
   streams,
-}: Pick<StreamwallState, 'config' | 'views' | 'streams'>) {
+  overlayLabelFontSize,
+}: Pick<StreamwallState, 'config' | 'views' | 'streams' | 'overlayLabelFontSize'>) {
   const { width, height, activeColor } = config
   const [expandedUrl, setExpandedUrl] = useState<string | undefined>()
   
@@ -106,6 +107,7 @@ function Overlay({
                 <StreamTitle
                   position={position}
                   activeColor={activeColor}
+                  fontSize={overlayLabelFontSize}
                   isListening={isListening}
                 >
                   <StreamIcon url={content.url} />
@@ -142,6 +144,7 @@ function Overlay({
               <StreamTitle
                 position={expandedData.labelPosition ?? 'top-left'}
                 activeColor={activeColor}
+                fontSize={overlayLabelFontSize}
                 isListening={false}
               >
                 <StreamIcon url={expandedData.link} />
@@ -197,8 +200,15 @@ function App() {
     return
   }
 
-  const { config, views, streams } = state
-  return <Overlay config={config} views={views} streams={streams} />
+  const { config, views, streams, overlayLabelFontSize } = state
+  return (
+    <Overlay
+      config={config}
+      views={views}
+      streams={streams}
+      overlayLabelFontSize={overlayLabelFontSize}
+    />
+  )
 }
 
 function VersionFooter() {
@@ -328,7 +338,7 @@ const SpaceBorder = styled.div.attrs(() => ({
   top: ${({ pos, isExpanded, windowHeight }) => isExpanded ? windowHeight * 0.1666 : pos.y}px;
   width: ${({ pos, isExpanded, windowWidth }) => isExpanded ? windowWidth * 0.6666 : pos.width}px;
   height: ${({ pos, isExpanded, windowHeight }) => isExpanded ? windowHeight * 0.6666 : pos.height}px;
-  border: 0 solid ${({ isHighlighted }) => isHighlighted ? '#00ff00' : 'black'};
+  border: 0 solid ${({ isHighlighted }) => (isHighlighted ? '#00ff00' : 'transparent')};
   border-left-width: ${({ pos, borderWidth, isExpanded }) =>
     (isExpanded || pos.x === 0) ? 0 : borderWidth}px;
   border-right-width: ${({ pos, borderWidth, windowWidth, isExpanded }) =>
@@ -351,6 +361,7 @@ const StreamTitle = styled.div`
   position: absolute;
   z-index: 100;
   pointer-events: auto;
+  font-size: ${({ fontSize = 16 }) => `${fontSize}px`};
   ${({ position }) => {
     if (position === 'top-left') {
       return `top: 10px; left: 10px;`
@@ -370,7 +381,6 @@ const StreamTitle = styled.div`
   justify-content: center;
   padding: 4px 10px;
   font-weight: 600;
-  font-size: 20px;
   color: white;
   text-shadow: 0 0 4px black;
   letter-spacing: -0.025em;

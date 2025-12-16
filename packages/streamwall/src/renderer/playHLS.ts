@@ -37,7 +37,13 @@ if (src) {
     enableWorker: true,
     startLevel: -1, // Auto-select quality
     defaultAudioCodec: undefined,
-    backBufferLength: 90,
+    // Trim buffers to reduce memory/CPU churn when many streams run
+    maxBufferLength: 8,
+    maxMaxBufferLength: 16,
+    backBufferLength: 30,
+    maxBufferSize: 60 * 1000 * 1000,
+    liveSyncDurationCount: 3,
+    capLevelToPlayerSize: true,
     liveDurationInfinity: true,
   })
 

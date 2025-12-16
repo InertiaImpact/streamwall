@@ -116,6 +116,11 @@ export interface StreamwallState {
   customStreams: StreamList
   views: ViewState[]
   streamdelay: StreamDelayStatus | null
+  overlayLabelFontSize?: number
+  refreshSchedule?: {
+    enabled: boolean
+    time: string // HH:mm in local time
+  }
   grids?: GridState[]
   savedLayouts?: Record<
     string,
@@ -154,6 +159,8 @@ export type ControlCommand =
   | { type: 'delete-token'; tokenId: string }
   | { type: 'refresh-all-views'; gridId?: string }
   | { type: 'refresh-errored-views'; gridId?: string }
+  | { type: 'set-refresh-schedule'; enabled: boolean; time: string }
+  | { type: 'set-label-font-size'; fontSize: number }
   | { type: 'save-layout'; slot: number; name: string; gridId?: string }
   | { type: 'load-layout'; slot: number; gridId?: string }
   | { type: 'clear-layout'; slot: number; gridId?: string }

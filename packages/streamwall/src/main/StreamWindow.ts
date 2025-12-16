@@ -93,7 +93,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         preload: path.join(__dirname, 'layerPreload.js'),
       },
     })
-    backgroundView.setBackgroundColor(backgroundColor)
+    backgroundView.setBackgroundColor('#0000')
     win.contentView.addChildView(backgroundView)
     backgroundView.setBounds({
       x: 0,
@@ -110,7 +110,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         preload: path.join(__dirname, 'layerPreload.js'),
       },
     })
-    overlayView.setBackgroundColor(backgroundColor)
+    overlayView.setBackgroundColor('#0000')
     win.contentView.addChildView(overlayView)
     overlayView.setBounds({
       x: 0,

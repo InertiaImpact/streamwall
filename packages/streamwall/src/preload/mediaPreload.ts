@@ -68,6 +68,22 @@ const NO_SCROLL_STYLE = `
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(() => resolve(), ms))
 
+async function ensurePlayback(video: HTMLMediaElement, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const wasMuted = video.muted
+      video.muted = true
+      await video.play()
+      video.muted = wasMuted
+      return true
+    } catch (err) {
+      console.warn('video play blocked; retrying muted', err)
+      await sleep(300)
+    }
+  }
+  return false
+}
+
 const pageReady = new Promise((resolve) =>
   document.addEventListener('DOMContentLoaded', resolve, { once: true }),
 )
@@ -211,11 +227,28 @@ async function findVideo(kind: 'video' | 'audio') {
     document.body.appendChild(video)
   }
 
-  try {
-    await video.play()
-  } catch (err) {
-    console.warn('Video play() was blocked; continuing muted', err)
+  const startPlayback = async (reason: string) => {
+    const ok = await ensurePlayback(video)
+    if (!ok) {
+      console.warn(`unable to start playback (${reason})`)
+    }
+    return ok
   }
+
+  await startPlayback('initial')
+
+  const resumePlayback = throttle((reason: string) => {
+    if (video.paused || video.ended) {
+      void startPlayback(reason)
+    }
+  }, 2000)
+
+  video.addEventListener('stalled', () => resumePlayback('stalled'))
+  video.addEventListener('suspend', () => resumePlayback('suspend'))
+  video.addEventListener('ended', () => {
+    video.currentTime = 0
+    resumePlayback('ended')
+  })
 
   if (video instanceof HTMLVideoElement && !video.videoWidth) {
     console.log(`video isn't playing yet. waiting for it to start...`)
@@ -224,13 +257,12 @@ async function findVideo(kind: 'video' | 'audio') {
     )
     await Promise.race([videoReady, sleep(30 * 1000)])
     if (!video.videoWidth) {
-      console.warn('Timeout waiting for video to start; continuing anyway')
+      console.warn('Timeout waiting for video to start; retrying')
+      await startPlayback('post-timeout')
     } else {
       console.log('video started')
     }
   }
-
-  video.muted = false
 
   const info = {
     title: document.title,

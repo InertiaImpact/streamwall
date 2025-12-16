@@ -40,6 +40,12 @@ if (!VERBOSE_LOG) {
 
 export interface StreamwallConfig {
   help: boolean
+  maintenance?: {
+    'refresh-all'?: {
+      enabled?: boolean
+      time?: string // HH:mm local time
+    }
+  }
   grid: {
     cols: number
     rows: number
@@ -301,6 +307,17 @@ function parseArgs(): StreamwallConfig {
         boolean: true,
         default: true,
       })
+      .group(['maintenance.refresh-all.enabled', 'maintenance.refresh-all.time'], 'Maintenance')
+      .option('maintenance.refresh-all.enabled', {
+        describe: 'Automatically refresh all views sequentially at a scheduled time',
+        boolean: true,
+        default: false,
+      })
+      .option('maintenance.refresh-all.time', {
+        describe: 'Local time (HH:mm) to refresh all views sequentially',
+        string: true,
+        default: '02:00',
+      })
       .help()
       // https://github.com/yargs/yargs/issues/2137
       .parseSync(process.argv) as unknown as StreamwallConfig
@@ -350,6 +367,8 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
     rows: defaultRows,
     x: pos.x,
     y: pos.y,
+    width: cfg.window.width,
+    height: cfg.window.height,
   }))
 
   const candidates = fromWindowGrids?.length ? fromWindowGrids : fromGridWindow ?? []
@@ -366,8 +385,8 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
       rows: candidate?.rows ?? defaultRows,
       x: pos?.x,
       y: pos?.y,
-      width: cfg.window.width,
-      height: cfg.window.height,
+      width: candidate?.width ?? cfg.window.width,
+      height: candidate?.height ?? cfg.window.height,
     })
   }
 
@@ -417,6 +436,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
       rows: g.rows ?? currentConfig.grid.rows,
       x: g.x ?? 0,
       y: g.y ?? 0,
+      width: g.width ?? currentConfig.window.width,
+      height: g.height ?? currentConfig.window.height,
     })),
   }
 
@@ -439,6 +460,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
       console.log('[wizard] Received save request', payload)
       try {
         const gridDefaults = { cols: currentConfig.grid.cols, rows: currentConfig.grid.rows }
+        const primaryWidth = Number(payload.grids?.[0]?.width) || currentConfig.window.width
+        const primaryHeight = Number(payload.grids?.[0]?.height) || currentConfig.window.height
         const nextConfig: StreamwallConfig = {
           ...currentConfig,
           control: {
@@ -458,8 +481,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
               rows: Number(g.rows) || gridDefaults.rows,
               x: g.x === '' || g.x === undefined ? undefined : Number(g.x),
               y: g.y === '' || g.y === undefined ? undefined : Number(g.y),
-              width: currentConfig.window.width,
-              height: currentConfig.window.height,
+              width: Number(g.width) || primaryWidth,
+              height: Number(g.height) || primaryHeight,
             })),
             cols: Number(payload.grids?.[0]?.cols) || currentConfig.grid.cols,
             rows: Number(payload.grids?.[0]?.rows) || currentConfig.grid.rows,
@@ -467,6 +490,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
           },
           window: {
             ...currentConfig.window,
+            width: primaryWidth,
+            height: primaryHeight,
             grids: undefined,
           },
         }
@@ -515,6 +540,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
           <label>Rows <input type="number" min="1" name="rows-${idx}" value="${g.rows}" /></label>
           <label>X <input type="number" name="x-${idx}" value="${g.x}" /></label>
           <label>Y <input type="number" name="y-${idx}" value="${g.y}" /></label>
+          <label>Width <input type="number" min="200" name="width-${idx}" value="${g.width}" /></label>
+          <label>Height <input type="number" min="200" name="height-${idx}" value="${g.height}" /></label>
         </fieldset>
       `
     }).join('')
@@ -575,7 +602,9 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
                 const rows = document.querySelector('[name="rows-' + i + '"]').value
                 const x = document.querySelector('[name="x-' + i + '"]').value
                 const y = document.querySelector('[name="y-' + i + '"]').value
-                grids.push({ id, cols, rows, x, y })
+                const width = document.querySelector('[name="width-' + i + '"]').value
+                const height = document.querySelector('[name="height-' + i + '"]').value
+                grids.push({ id, cols, rows, x, y, width, height })
               }
               return {
                 host: document.getElementById('host').value || '0.0.0.0',
@@ -641,6 +670,9 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       // Resolve control UI static assets with fallbacks for dev and packaged builds
       const staticCandidates = [
         process.env.STREAMWALL_CONTROL_STATIC,
+        // Prefer workspace build output if it exists
+        join(process.cwd(), 'packages/streamwall-control-client/dist'),
+        // Fallbacks for packaged app locations
         typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined' && MAIN_WINDOW_VITE_DEV_SERVER_URL
           ? join(process.cwd(), 'packages/streamwall-control-client/dist')
           : null,
@@ -815,7 +847,12 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     customStreams: [],
     views: [],
     streamdelay: null,
-    savedLayouts: initialSavedLayouts
+    overlayLabelFontSize: 16,
+    savedLayouts: initialSavedLayouts,
+    refreshSchedule: {
+      enabled: argv.maintenance?.['refresh-all']?.enabled ?? false,
+      time: argv.maintenance?.['refresh-all']?.time ?? '02:00',
+    },
   }
 
   const stateDoc = new Y.Doc()
@@ -917,6 +954,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   })
 
   let tomlFiles: string[] = []
+  let refreshScheduleTimer: NodeJS.Timeout | null = null
 
   type ExtendedControlCommand =
     | ControlCommand
@@ -925,6 +963,8 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     | { type: 'import-layouts'; gridId?: string }
     | { type: 'export-streams-toml' }
     | { type: 'import-streams-toml' }
+    | { type: 'set-refresh-schedule'; enabled: boolean; time: string }
+    | { type: 'set-label-font-size'; fontSize: number }
 
   const onCommand = async (msg: ExtendedControlCommand) => {
     if (!msg || typeof msg !== 'object' || typeof (msg as any).type !== 'string') {
@@ -1035,6 +1075,29 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         console.debug('Refreshing errored views sequentially...')
         getGridRuntime(msg.gridId).window.refreshErroredViewsSequentially()
         break
+      case 'set-label-font-size': {
+        const clamped = Math.max(8, Math.min(48, Math.round(msg.fontSize)))
+        console.debug('[labels] setting overlay label font size to', clamped)
+        clientState = { ...clientState, overlayLabelFontSize: clamped }
+        updateState({ overlayLabelFontSize: clamped })
+        break
+      }
+      case 'set-refresh-schedule': {
+        const { enabled, time } = msg
+        if (!/^\d{2}:\d{2}$/.test(time)) {
+          console.warn('[schedule] invalid time format, expected HH:mm, got', time)
+          break
+        }
+        console.debug('[schedule] updating refresh schedule', { enabled, time })
+        await persistRefreshSchedule(enabled, time)
+        clientState = {
+          ...clientState,
+          refreshSchedule: { enabled, time },
+        }
+        updateState({ refreshSchedule: clientState.refreshSchedule })
+        scheduleRefreshAll(clientState.refreshSchedule)
+        break
+      }
       case 'export-streams-toml': {
         await exportStreamsToml()
         break
@@ -1270,6 +1333,58 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     console.log('[streams] imported streams.toml to', targetPath)
   }
 
+  function scheduleRefreshAll(schedule: { enabled: boolean; time: string } | undefined) {
+    if (refreshScheduleTimer) {
+      clearTimeout(refreshScheduleTimer)
+      refreshScheduleTimer = null
+    }
+    if (!schedule?.enabled) {
+      console.debug('[schedule] refresh all disabled')
+      return
+    }
+
+    const now = new Date()
+    const [hoursStr, minutesStr] = schedule.time.split(':')
+    const target = new Date(now)
+    target.setHours(Number(hoursStr), Number(minutesStr), 0, 0)
+    if (target <= now) {
+      target.setDate(target.getDate() + 1)
+    }
+
+    const delayMs = target.getTime() - now.getTime()
+    console.debug('[schedule] next refresh-all at', target.toString(), 'in', delayMs, 'ms')
+
+    refreshScheduleTimer = setTimeout(async () => {
+      try {
+        console.log('[schedule] running scheduled refresh-all')
+        getGridRuntime().window.refreshAllViewsSequentially()
+      } catch (err) {
+        console.warn('[schedule] failed to run refresh-all', err)
+      } finally {
+        scheduleRefreshAll(schedule)
+      }
+    }, delayMs)
+  }
+
+  async function persistRefreshSchedule(enabled: boolean, time: string) {
+    const configPath = join(app.getPath('userData'), 'config.toml')
+    let current: StreamwallConfig = parseArgs()
+    const next: StreamwallConfig = {
+      ...current,
+      maintenance: {
+        ...(current.maintenance ?? {}),
+        'refresh-all': {
+          ...(current.maintenance?.['refresh-all'] ?? {}),
+          enabled,
+          time,
+        },
+      },
+    }
+    const serializableConfig = pruneUndefined(next)
+    fs.writeFileSync(configPath, TOML.stringify(serializableConfig as any))
+    console.debug('[schedule] persisted refresh schedule to config', configPath)
+  }
+
   function updateState(newState: Partial<StreamwallState>) {
     const grids = gridRuntimes.map((grid) => ({
       id: grid.id,
@@ -1452,6 +1567,8 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     : [join(app.getPath('userData'), 'streams.toml')]
   ).map((p) => (isAbsolute(p) ? p : join(app.getPath('userData'), p)))
   console.debug('Resolved TOML data files:', tomlFiles)
+
+  scheduleRefreshAll(clientState.refreshSchedule)
 
   const dataSources = [
     ...argv.data['json-url'].map((url) => {

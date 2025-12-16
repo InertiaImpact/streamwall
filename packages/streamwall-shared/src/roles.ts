@@ -26,7 +26,15 @@ const operatorActions = [
   'clear-layout',
 ] as const
 
-const monitorActions = ['set-view-blurred', 'set-stream-censored'] as const
+const monitorActions = [
+  'set-view-blurred',
+  'set-stream-censored',
+  'refresh-all-views',
+  'refresh-errored-views',
+  'save-layout',
+  'load-layout',
+  'clear-layout',
+] as const
 
 export type StreamwallRole = (typeof validRoles)[number]
 export type StreamwallAction =
