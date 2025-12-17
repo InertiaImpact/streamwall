@@ -7,6 +7,7 @@ import {
 } from 'electron'
 import { isEqual } from 'lodash-es'
 import { ViewContent, ViewPos } from 'streamwall-shared'
+import { Buffer } from 'buffer'
 import {
   ContentDisplayOptions,
   ContentViewInfo,
@@ -144,9 +145,13 @@ const viewStateMachine = setup({
   actors: {
     loadPage: fromPromise(
       async ({
-        input: { content, view },
+        input: { content, view, options },
       }: {
-        input: { content: ViewContent | null; view: WebContentsView }
+        input: {
+          content: ViewContent | null
+          view: WebContentsView
+          options: ContentDisplayOptions | null
+        }
       }) => {
         assert(content !== null)
 
@@ -155,7 +160,11 @@ const viewStateMachine = setup({
         wc.audioMuted = true
 
         if (/\.m3u8?$/.test(content.url)) {
-          loadHTML(wc, 'playHLS', { query: { src: content.url } })
+              const query: Record<string, string> = { src: content.url }
+              if (options?.crop) {
+                query.crop = Buffer.from(JSON.stringify(options.crop)).toString('base64')
+              }
+              loadHTML(wc, 'playHLS', { query })
         } else {
           wc.loadURL(content.url)
         }
@@ -175,6 +184,15 @@ const viewStateMachine = setup({
     info: null,
   }),
   on: {
+    OPTIONS: {
+      actions: assign({
+        options: ({ event }) => event.options,
+      }),
+      guard: {
+        type: 'optionsChanged',
+        params: ({ event: { options } }) => ({ options }),
+      },
+    },
     DISPLAY: {
       target: '.displaying',
       actions: assign({
@@ -241,7 +259,11 @@ const viewStateMachine = setup({
             navigate: {
               invoke: {
                 src: 'loadPage',
-                input: ({ context: { content, view } }) => ({ content, view }),
+                input: ({ context: { content, view, options } }) => ({
+                  content,
+                  view,
+                  options,
+                }),
                 onDone: {
                   target: 'waitForInit',
                 },

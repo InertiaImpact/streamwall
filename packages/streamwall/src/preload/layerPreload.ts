@@ -13,14 +13,18 @@ const api = {
       ipcRenderer.off('state', internalHandler)
     }
   },
-  onSpotlight: (handleSpotlight: (url: string) => void) => {
-    const internalHandler = (_ev: IpcRendererEvent, url: string) =>
-      handleSpotlight(url)
+  onSpotlight: (handleSpotlight: (url: string, streamId?: string) => void) => {
+    const internalHandler = (
+      _ev: IpcRendererEvent,
+      payload: { url?: string; streamId?: string },
+    ) => handleSpotlight(payload?.url, payload?.streamId)
     ipcRenderer.on('spotlight', internalHandler)
     return () => {
       ipcRenderer.off('spotlight', internalHandler)
     }
   },
+  spotlight: (url?: string, streamId?: string) =>
+    ipcRenderer.send('spotlight-local', { url, streamId }),
 }
 
 export type StreamwallLayerGlobal = typeof api

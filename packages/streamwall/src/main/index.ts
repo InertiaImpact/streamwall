@@ -40,6 +40,8 @@ if (!VERBOSE_LOG) {
 
 export interface StreamwallConfig {
   help: boolean
+  /** Skip the first-run config wizard (CLI-only flag) */
+  skipSetup?: boolean
   maintenance?: {
     'refresh-all'?: {
       enabled?: boolean
@@ -125,6 +127,11 @@ function parseArgs(): StreamwallConfig {
         return TOML.parse(fs.readFileSync(configPath, 'utf-8'))
       })
       .group(['grid.cols', 'grid.rows'], 'Grid dimensions')
+      .option('skip-setup', {
+        describe: 'Bypass the setup wizard and launch directly (use existing config/defaults)',
+        boolean: true,
+        default: false,
+      })
       .option('grid.count', {
         describe: 'Number of independent output grids/windows',
         number: true,
@@ -808,6 +815,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   })
   const gridCount = gridRuntimes.length
   const gridRuntimeMap = new Map(gridRuntimes.map((grid) => [grid.id, grid]))
+  const gridSpotlight = new Map<string, string | null>()
   const controlWindow = new ControlWindow()
   controlWindow.on('close', () => {
     console.warn('Control window closed; quitting app.')
@@ -817,6 +825,15 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   let browseWindow: BrowserWindow | null = null
   let streamdelayClient: StreamdelayClient | null = null
   const gridViewState = new Map<string, ViewState[]>()
+
+  function getSpotlightToken(url?: string, streamId?: string) {
+    if (streamId) return streamId
+    if (!url) return null
+    const fromUrl = clientState.streams.byURL?.get(url)
+    const preferred = fromUrl?.find((s) => !s.crop) ?? fromUrl?.[0]
+    const idFromUrl = preferred?._id
+    return idFromUrl ?? url
+  }
 
   console.debug('Creating initial state...')
   const initialSavedLayouts = db.data.savedLayouts ? Object.fromEntries(
@@ -857,6 +874,21 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   const stateDoc = new Y.Doc()
   const viewsState = stateDoc.getMap<Y.Map<string | undefined>>('views')
+  const uiStateMap = stateDoc.getMap<Y.AbstractType>('uiState')
+
+  const yMapToObject = (m: Y.Map<any>): Record<string, any> => {
+    const out: Record<string, any> = {}
+    m.forEach((v, k) => {
+      if (v instanceof Y.Map) {
+        out[k] = yMapToObject(v as Y.Map<any>)
+      } else {
+        out[k] = v
+      }
+    })
+    return out
+  }
+
+  const serializeUiState = () => yMapToObject(uiStateMap as unknown as Y.Map<any>)
 
   if (db.data.stateDoc) {
     console.log('Loading stateDoc from storage...')
@@ -928,13 +960,14 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         const globalIdx = grid.cellOffset + localIdx
         const viewData = ensureViewEntry(globalIdx)
         const streamId = viewData.get('streamId')
-        const stream = clientState.streams.find((s) => s._id === streamId)
+        const stream = clientState.streams.byId?.get(streamId)
         if (!stream) {
           continue
         }
         viewContentMap.set(String(localIdx), {
           url: stream.link,
           kind: stream.kind || 'video',
+          streamId: stream._id,
         })
       }
       grid.window.setViews(viewContentMap, clientState.streams)
@@ -1229,9 +1262,17 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         break
       }
       case 'spotlight':
-        console.debug('Spotlighting stream:', msg.url)
+        console.debug('Spotlighting stream:', msg.url, msg.streamId)
         console.debug('Calling grid spotlight with URL:', msg.url)
-        getGridRuntime(msg.gridId).window.spotlight(msg.url)
+        getGridRuntime(msg.gridId).window.spotlight(msg.url, msg.streamId)
+        {
+          const gridKey = resolveGridId(msg.gridId)
+          const token = getSpotlightToken(msg.url, msg.streamId)
+          const current = gridSpotlight.get(gridKey) ?? null
+          const next = current === token ? null : token
+          gridSpotlight.set(gridKey, next)
+          updateState({})
+        }
         break
       default:
         console.warn('Unknown command type received:', msg.type)
@@ -1391,13 +1432,17 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       config: grid.config,
       cellOffset: grid.cellOffset,
       views: gridViewState.get(grid.id) ?? [],
+      spotlightStreamId: gridSpotlight.get(grid.id) ?? null,
     }))
 
     const primaryGrid = grids[0]
 
+    const uiState = serializeUiState()
+
     clientState = {
       ...clientState,
       ...newState,
+      uiState,
       grids,
       config: primaryGrid?.config ?? clientState.config,
       views: primaryGrid?.views ?? clientState.views,
@@ -1439,11 +1484,20 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       }
       grid.window.onState(scopedState)
     })
+
+    grid.window.on('spotlight-local', (url, streamId) => {
+      const token = getSpotlightToken(url, streamId)
+      const current = gridSpotlight.get(grid.id) ?? null
+      const next = current === token ? null : token
+      gridSpotlight.set(grid.id, next)
+      updateState({})
+    })
   }
 
   // Control <- main collab updates
   stateDoc.on('update', (update) => {
     controlWindow.onYDocUpdate(update)
+    updateState({})
   })
 
   // Control <- main init state
@@ -1630,6 +1684,12 @@ function init() {
   app
     .whenReady()
     .then(async () => {
+      const skipSetup = (argv as any)['skip-setup'] ?? (argv as any).skipSetup ?? false
+      if (skipSetup) {
+        console.log('[init] skip-setup flag present; launching main app without wizard')
+        await main(argv)
+        return
+      }
       // Show config wizard before launching main windows
       const result = await openConfigWizard(argv)
       console.log('[init] Wizard result:', result)

@@ -12,6 +12,7 @@ export interface ViewPos extends Rectangle {
 export interface ViewContent {
   url: string
   kind: ContentKind
+  streamId?: string
 }
 export type ViewContentMap = Map<string, ViewContent>
 

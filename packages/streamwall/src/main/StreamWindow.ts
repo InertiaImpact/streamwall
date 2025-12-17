@@ -24,14 +24,28 @@ function getDisplayOptions(stream: StreamData): ContentDisplayOptions {
   if (!stream) {
     return {}
   }
-  const { rotation } = stream
-  return { rotation }
+  const opts: ContentDisplayOptions = {}
+  if (typeof stream.rotation === 'number') {
+    opts.rotation = stream.rotation
+  }
+  if (stream.crop) {
+    opts.crop = stream.crop
+  }
+  return opts
+}
+
+function pickStreamByUrl(streams: StreamList, url: string) {
+  const candidates = streams.byURL?.get(url)
+  if (!candidates || candidates.length === 0) return undefined
+  // Prefer a candidate without crop; otherwise fall back to the first entry.
+  return candidates.find((s) => !s.crop) ?? candidates[0]
 }
 
 export interface StreamWindowEventMap {
   load: []
   close: []
   state: [ViewState[]]
+  'spotlight-local': [string | undefined, string | undefined]
 }
 
 export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
@@ -139,6 +153,12 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         return
       }
       inst.emit('load')
+    })
+
+    ipcMain.on('spotlight-local', (ev, { url, streamId }: { url?: string; streamId?: string }) => {
+      const inst = StreamWindow.senderToWindow.get(ev.sender.id)
+      if (!inst) return
+      inst.emit('spotlight-local', url, streamId)
     })
 
     ipcMain.handle('view-init', async (ev) => {
@@ -305,6 +325,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         spaces?: number[],
       ) => boolean
     > = [
+      // Keep errored views with the same content so they remain failed instead of being recreated and retried.
+      (v, content) => isEqual(v.context.content, content) && v.matches({ displaying: 'error' }),
       // First try to find a loaded view of the same URL in the same space...
       (v, content, spaces) =>
         isEqual(v.context.content, content) &&
@@ -349,7 +371,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         continue
       }
 
-      const stream = streams.byURL?.get(content.url)
+      const stream = content.streamId
+        ? streams.byId?.get(content.streamId)
+        : pickStreamByUrl(streams, content.url)
       if (!stream) {
         continue
       }
@@ -362,8 +386,16 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         spaces,
       }
 
-      view.send({ type: 'DISPLAY', pos, content })
+      const snapshot = view.getSnapshot()
+      // If this view is already errored for the same content, keep it as-is to avoid a reload loop.
+      if (snapshot.matches({ displaying: 'error' }) && isEqual(snapshot.context.content, content)) {
+        newViews.set(snapshot.context.id, view)
+        continue
+      }
+
+      // Send display options first so the view has them during initial navigation.
       view.send({ type: 'OPTIONS', options: getDisplayOptions(stream) })
+      view.send({ type: 'DISPLAY', pos, content })
       newViews.set(view.getSnapshot().context.id, view)
     }
     for (const view of unusedViews) {
@@ -489,8 +521,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         continue
       }
 
-      const { url } = content
-      const stream = state.streams.byURL?.get(url)
+      const { url, streamId } = content
+      const stream = streamId
+        ? state.streams.byId?.get(streamId)
+        : pickStreamByUrl(state.streams, url)
       if (stream) {
         view.send({
           type: 'OPTIONS',
@@ -500,8 +534,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     }
   }
 
-  spotlight(url: string) {
-    console.debug('Spotlighting stream:', url)
-    this.overlayView.webContents.send('spotlight', url)
+  spotlight(url?: string, streamId?: string) {
+    console.debug('Spotlighting stream:', url, streamId)
+    this.overlayView.webContents.send('spotlight', { url, streamId })
   }
 }

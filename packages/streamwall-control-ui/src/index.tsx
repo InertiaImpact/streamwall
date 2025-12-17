@@ -114,6 +114,28 @@ function filterStreams(
   highwayFilters: Set<string>,
   cityFilters: Set<string>,
 ) {
+  const matchesLocationFilters = (label?: string | null) => {
+    if (!label) return highwayFilters.size === 0 && cityFilters.size === 0
+
+    if (highwayFilters.size > 0) {
+      const matchesHighway = Array.from(highwayFilters).some((highway) =>
+        label.includes(highway),
+      )
+      if (!matchesHighway) return false
+    }
+
+    if (cityFilters.size > 0) {
+      const matchesCity = Array.from(cityFilters).some((city) => {
+        if (label.startsWith(city + ' -')) return true
+        const cityPattern = new RegExp(`^\\d*${city}\\w* -`, 'i')
+        return cityPattern.test(label)
+      })
+      if (!matchesCity) return false
+    }
+
+    return true
+  }
+
   const wallStreams = []
   const liveStreams = []
   const otherStreams = []
@@ -130,39 +152,17 @@ function filterStreams(
     ) {
       continue
     }
+
+    // Apply highway/city filters to all categories
+    if ((highwayFilters.size > 0 || cityFilters.size > 0) && !matchesLocationFilters(label)) {
+      continue
+    }
     
     if (wallStreamIds.has(_id)) {
       wallStreams.push(stream)
     } else if ((kind && kind !== 'video') || status === 'Live') {
       liveStreams.push(stream)
     } else {
-      // Apply static filter logic for offline streams
-      if ((highwayFilters.size > 0 || cityFilters.size > 0) && label) {
-        let matchesFilters = true
-        
-        // If highway filters are selected, check if stream contains any of them
-        if (highwayFilters.size > 0) {
-          const matchesHighway = Array.from(highwayFilters).some(highway => 
-            label.includes(highway)
-          )
-          if (!matchesHighway) matchesFilters = false
-        }
-        
-        // If city filters are selected, check if stream starts with any of them
-        if (cityFilters.size > 0) {
-          const matchesCity = Array.from(cityFilters).some(city => {
-            // Check for exact matches like "CR -", "IC -", etc.
-            if (label.startsWith(city + ' -')) return true
-            
-            // Check for variations with digits like "6DT -", "6DW -", etc.
-            const cityPattern = new RegExp(`^\\d*${city}\\w* -`, 'i')
-            return cityPattern.test(label)
-          })
-          if (!matchesCity) matchesFilters = false
-        }
-        
-        if (!matchesFilters) continue
-      }
       otherStreams.push(stream)
     }
   }
@@ -201,7 +201,11 @@ export function useYDoc<T>(keys: string[]): {
 
 export interface CollabData {
   views: { [viewIdx: string]: { streamId: string | undefined } }
-  uiState?: { loopRefreshErrored?: boolean }
+  uiState?: {
+    loopRefreshErrored?: boolean
+    spotlightAssignments?: Record<string, string | null>
+    spotlightedByGrid?: Record<string, string | null>
+  }
 }
 
 export interface StreamwallConnection {
@@ -225,6 +229,7 @@ export interface StreamwallConnection {
     views: ViewInfo[]
     stateIdxMap: Map<number, ViewInfo>
     cellOffset: number
+    spotlightStreamId?: string | null
   }>
   defaultGridId?: string | null
 }
@@ -330,10 +335,11 @@ import 'leaflet/dist/leaflet.css'
 // ...existing code...
 
 // Leaflet.js map component - works reliably in web browser environment
-function StreamLocationMap({ streams, wallStreams, onStreamPreview }: { 
+function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddToGrid }: { 
   streams: StreamData[], 
   wallStreams: StreamData[],
-  onStreamPreview: (streamId: string) => void
+  onStreamPreview: (streamId: string) => void,
+  onStreamAddToGrid?: (streamId: string) => void
 }) {
   const mapRef = useRef<HTMLDivElement>(null)
   const leafletMapRef = useRef<any>(null)
@@ -346,6 +352,12 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
   if (streams.length > 0) {
     console.log('First stream:', streams[0])
   }
+
+  const getMarkerColor = useCallback((stream: StreamData, isViewing: boolean) => {
+    if (isViewing) return '#d32f2f' // active in grid
+    const live = stream.status === 'Live' || stream.isLive
+    return live ? '#4CAF50' : '#9E9E9E'
+  }, [])
   
   // Filter streams that have location data
   const streamWithLocation = useMemo(() => {
@@ -377,7 +389,8 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
           center: [41.85571672210071, -91.86152308331968], // Centered on specified location
           zoom: 10,
           zoomControl: true,
-          scrollWheelZoom: true
+          scrollWheelZoom: true,
+          boxZoom: false, // Disable shift+drag box zoom so shift+click adds to grid cleanly
         })
         console.log('Map instance created')
 
@@ -449,7 +462,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
         
         const marker = L.circleMarker([stream.latitude!, stream.longitude!], {
           radius: 6,
-          fillColor: isViewing ? '#4CAF50' : '#1976D2',
+          fillColor: getMarkerColor(stream, isViewing),
           color: '#ffffff',
           weight: 2,
           opacity: 0.8,
@@ -473,10 +486,26 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
           onStreamPreview(stream._id)
         })
 
-        // Handle click to highlight in list
-        marker.on('click', () => {
+        const handleMarkerActivate = (ev: any) => {
+          const nativeEvt = ev?.originalEvent
+          if (nativeEvt && (nativeEvt as any).__swHandled) {
+            return
+          }
+          if (nativeEvt) {
+            ;(nativeEvt as any).__swHandled = true
+          }
+          const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
+          if (shiftPressed && onStreamAddToGrid) {
+            nativeEvt?.preventDefault?.()
+            nativeEvt?.stopPropagation?.()
+            onStreamAddToGrid(stream._id)
+            return
+          }
           onStreamPreview(stream._id)
-        })
+        }
+
+        // Handle click; boxZoom is disabled so shift+click won't trigger zoom
+        marker.on('click', handleMarkerActivate)
 
         marker.addTo(leafletMapRef.current)
         markersRef.current.set(stream._id, marker)
@@ -494,22 +523,25 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
     }
 
     updateMarkers()
-  }, [streamWithLocation, wallStreams, onStreamPreview, mapReady])
+  }, [streamWithLocation, wallStreams, onStreamPreview, onStreamAddToGrid, mapReady])
 
   // Update marker colors when wallStreams changes (without redrawing all markers)
   useEffect(() => {
     if (!markersInitializedRef.current || markersRef.current.size === 0) return
 
     const wallStreamIds = new Set(wallStreams.map(s => s._id))
+    const streamById = new Map(streams.map((s) => [s._id, s]))
     
     markersRef.current.forEach((marker, streamId) => {
       const isViewing = wallStreamIds.has(streamId)
-      const newColor = isViewing ? '#4CAF50' : '#1976D2'
+      const stream = streamById.get(streamId)
+      if (!stream) return
+      const newColor = getMarkerColor(stream, isViewing)
       marker.setStyle({ fillColor: newColor })
     })
     
-    console.log('Updated marker colors based on', wallStreams.length, 'wall streams')
-  }, [wallStreams])
+    console.log('Updated marker colors based on', wallStreams.length, 'wall streams and live status')
+  }, [wallStreams, streams, getMarkerColor])
 
   const handleHomeClick = useCallback(() => {
     if (leafletMapRef.current) {
@@ -643,7 +675,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview }: {
         fontSize: '11px',
         color: '#666'
       }}>
-        {streamWithLocation.length} cameras with location data • Click markers to highlight in stream list
+        {streamWithLocation.length} cameras with location data • Click markers to highlight in stream list • Shift+click to add to grid
       </div>
     </div>
   )
@@ -723,6 +755,33 @@ export function ControlUI({
   }, [])
 
   const [spotlightedStreamId, setSpotlightedStreamId] = useState<string | undefined>()
+
+  useEffect(() => {
+    if (!activeGrid) {
+      setSpotlightedStreamId(undefined)
+      return
+    }
+    // Respect the grid's authoritative spotlight value even when null, so we don't fall back to stale legacy tokens
+    let spotlightToken: string | null | undefined
+    if (Object.prototype.hasOwnProperty.call(activeGrid, 'spotlightStreamId')) {
+      spotlightToken = activeGrid.spotlightStreamId ?? null
+    } else {
+      spotlightToken =
+        sharedState?.uiState?.spotlightedByGrid?.[activeGrid.id] ??
+        sharedState?.uiState?.spotlightAssignments?.[activeGrid.id] ??
+        null
+    }
+
+    if (!spotlightToken) {
+      setSpotlightedStreamId(undefined)
+      return
+    }
+
+    const matchingStreamId = streams.find(
+      (stream) => stream._id === spotlightToken || stream.link === spotlightToken,
+    )?._id
+    setSpotlightedStreamId(matchingStreamId ?? undefined)
+  }, [activeGrid, sharedState, streams])
 
   const handleRefreshAllViews = useCallback(() => {
     send({ type: 'refresh-all-views', gridId: activeGridId ?? undefined })
@@ -1121,9 +1180,11 @@ export function ControlUI({
         return
       }
 
+      const viewsMap = getViewsMap()
       const availableIdx = range(cols * rows).find((i) => {
         const globalIdx = toGlobalIdx(i)
-        const streamIdAtIdx = getSharedStreamId(globalIdx)
+        const viewEntry = viewsMap.get(String(globalIdx))
+        const streamIdAtIdx = viewEntry?.get('streamId') ?? getSharedStreamId(globalIdx)
         return !streamIdAtIdx
       })
       if (availableIdx === undefined) {
@@ -1131,7 +1192,7 @@ export function ControlUI({
       }
       handleSetView(availableIdx, streamId)
     },
-    [cols, rows, sharedState, focusedInputIdx, toGlobalIdx, getSharedStreamId, handleSetView],
+    [cols, rows, sharedState, focusedInputIdx, toGlobalIdx, getSharedStreamId, handleSetView, getViewsMap],
   )
 
   const handleSwapWithSpot = useCallback(
@@ -1380,7 +1441,7 @@ export function ControlUI({
   )
 
   return (
-    <Stack flex="1" direction="row" gap={16}>
+    <Stack flex="1" direction="row" gap={16} style={{ minHeight: '100vh', alignItems: 'stretch' }}>
       <Stack className="grid-container">
         <StyledHeader>
           {role !== 'local' && (
@@ -1850,6 +1911,7 @@ export function ControlUI({
                 streams={streams}
                 wallStreams={wallStreams}
                 onStreamPreview={handleStreamPreview}
+                onStreamAddToGrid={handleClickId}
               />
             </div>
           </div>
@@ -1931,7 +1993,7 @@ export function ControlUI({
           <Facts />
         </StyledDataContainer>
       </Stack>
-      <Stack className="stream-list" flex="1" scroll={true} minHeight={200}>
+      <Stack className="stream-list" flex="1" scroll={true} minHeight={200} style={{ maxHeight: '100vh' }}>
         <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
           {isConnected ? (
             <div>

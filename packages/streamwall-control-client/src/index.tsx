@@ -92,6 +92,40 @@ function useStreamwallWebsocketConnection(
         }
         lastStateData = state
         setStreamwallState(state)
+      } else if (msg.type === 'spotlight-state') {
+        const uiStateMap = stateDoc.getMap<any>('uiState')
+        let spotlightAssignments = uiStateMap.get('spotlightAssignments') as
+          | Y.Map<string | null>
+          | undefined
+        if (!spotlightAssignments) {
+          spotlightAssignments = new Y.Map<string | null>()
+          uiStateMap.set('spotlightAssignments', spotlightAssignments)
+        }
+        let legacySpotlightMap = uiStateMap.get('spotlightedByGrid') as
+          | Y.Map<string | null>
+          | undefined
+        if (!legacySpotlightMap) {
+          legacySpotlightMap = new Y.Map<string | null>()
+          uiStateMap.set('spotlightedByGrid', legacySpotlightMap)
+        }
+        const { gridId, token, url } = msg
+        spotlightAssignments.set(gridId, token)
+        legacySpotlightMap.set(gridId, token)
+        // Also update lastStateData copy for stateDiff consistency
+        lastStateData = {
+          ...lastStateData,
+          uiState: {
+            ...(lastStateData?.uiState ?? {}),
+            spotlightAssignments: {
+              ...(lastStateData?.uiState?.spotlightAssignments ?? {}),
+              [gridId]: token,
+            },
+            spotlightedByGrid: {
+              ...(lastStateData?.uiState?.spotlightedByGrid ?? {}),
+              [gridId]: token,
+            },
+          },
+        } as StreamwallState
       } else {
         console.warn('unexpected ws message', msg)
       }
@@ -138,6 +172,7 @@ function useStreamwallWebsocketConnection(
     ...appState,
     isConnected,
     send,
+    uiState: appState.uiState,
     sharedState,
     stateDoc,
   }

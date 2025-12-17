@@ -1,6 +1,6 @@
 import Color from 'color'
 import { render } from 'preact'
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
 import { useHotkeys } from 'react-hotkeys-hook'
 import {
   FaFacebook,
@@ -35,27 +35,61 @@ function Overlay({
 }: Pick<StreamwallState, 'config' | 'views' | 'streams' | 'overlayLabelFontSize'>) {
   const { width, height, activeColor } = config
   const [expandedUrl, setExpandedUrl] = useState<string | undefined>()
+  const [expandedStreamId, setExpandedStreamId] = useState<string | undefined>()
+
+  const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
+    const key = streamId ?? url
+    setExpandedUrl((prev) => {
+      const shouldClose = expandedStreamId === streamId || (!streamId && prev === url)
+      const nextUrl = shouldClose ? undefined : url
+      const nextStreamId = shouldClose ? undefined : streamId
+      setExpandedStreamId(nextStreamId)
+      window.streamwallLayer.spotlight(nextUrl, nextStreamId)
+      return nextUrl
+    })
+  }, [expandedStreamId])
   
   // Listen for spotlight messages from the main process
   useEffect(() => {
     console.debug('Setting up spotlight listener')
-    const unsubscribe = window.streamwallLayer.onSpotlight((url: string) => {
-      console.debug('Received spotlight message for URL:', url)
-      console.debug('Current expandedUrl:', expandedUrl)
-      console.debug('Toggling expandedUrl...')
-      setExpandedUrl(expandedUrl === url ? undefined : url)
-    })
+    const unsubscribe = window.streamwallLayer.onSpotlight(
+      (url: string, streamId?: string) => {
+        console.debug('Received spotlight message for URL:', url, streamId)
+        const key = streamId ?? url
+        const isSame = expandedStreamId
+          ? expandedStreamId === streamId
+          : expandedUrl === url
+        setExpandedUrl(isSame ? undefined : url)
+        setExpandedStreamId(isSame ? undefined : streamId)
+      },
+    )
     return unsubscribe
-  }, [expandedUrl])
+  }, [expandedStreamId, expandedUrl])
   
   // Memoize stream lookup map for faster access
   const streamsByUrl = useMemo(() => {
-    const map = new Map()
-    streams.forEach(s => map.set(s.link, s))
+    const map = new Map<string, any[]>()
+    streams.forEach((s) => {
+      const arr = map.get(s.link) ?? []
+      arr.push(s)
+      map.set(s.link, arr)
+    })
+    return map
+  }, [streams])
+
+  const streamsById = useMemo(() => {
+    const map = new Map<string, any>()
+    streams.forEach((s) => s._id && map.set(s._id, s))
     return map
   }, [streams])
   
-  const expandedData = expandedUrl ? streamsByUrl.get(expandedUrl) : undefined
+  const expandedData = expandedStreamId
+    ? streamsById.get(expandedStreamId)
+    : expandedUrl
+      ? streamsByUrl.get(expandedUrl)?.[0]
+      : undefined
+
+  const expandedKey = expandedStreamId ?? expandedUrl
   
   const activeViews = views.filter(
     ({ state }) =>
@@ -72,7 +106,9 @@ function Overlay({
           return
         }
 
-        const data = streams.find((d) => content.url === d.link)
+        const data = content.streamId
+          ? streamsById.get(content.streamId)
+          : streamsByUrl.get(content.url)?.[0]
         const isListening = matchesState(
           'displaying.running.audio.listening',
           state,
@@ -88,7 +124,7 @@ function Overlay({
         const isLoading = matchesState('displaying.loading', state)
         const hasTitle = data && (data.label || data.source)
         const position = data?.labelPosition ?? 'top-left'
-        const isExpanded = expandedUrl === content.url
+        const isExpanded = expandedKey === (content.streamId ?? content.url)
         return (
           <div key={`${pos.spaces.join('-')}`}>
             <SpaceBorder
@@ -97,9 +133,9 @@ function Overlay({
               windowHeight={height}
               activeColor={activeColor}
               isListening={isListening}
-              isExpanded={false}
-              isHighlighted={expandedUrl === content.url}
-              onClick={() => setExpandedUrl(content.url)}
+              isExpanded={isExpanded}
+              isHighlighted={isExpanded}
+              onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
               <BlurCover isBlurred={isBlurred} />
@@ -138,8 +174,8 @@ function Overlay({
         />
       ))}
       {expandedUrl && expandedData && (
-        <ExpandedOverlay onClick={() => setExpandedUrl(undefined)}>
-          <ExpandedContent onClick={() => setExpandedUrl(undefined)}>
+        <ExpandedOverlay onClick={() => toggleSpotlight(undefined, undefined)}>
+          <ExpandedContent onClick={() => toggleSpotlight(undefined, undefined)}>
             {expandedData && (expandedData.label || expandedData.source) && (
               <StreamTitle
                 position={expandedData.labelPosition ?? 'top-left'}
@@ -162,7 +198,7 @@ function Overlay({
             {/\.m3u8(\?.*)?$/.test(expandedUrl) ? (
               <ExpandedVideoFrame
                 key={expandedUrl}
-                src={`./playHLS.html?src=${encodeURIComponent(expandedUrl)}`}
+                src={`./playHLS.html?src=${encodeURIComponent(expandedUrl)}${expandedData.crop ? `&crop=${encodeURIComponent(JSON.stringify(expandedData.crop))}` : ''}`}
                 sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"
                 allow="autoplay accelerometer camera geolocation gyroscope magnetometer microphone midi payment usb vr xr-spatial-tracking"
                 scrolling="no"
@@ -436,11 +472,12 @@ const LoadingSpinner = styled(TailSpin)`
 
 const BlurCover = styled.div`
   position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  backdrop-filter: ${({ isBlurred }) => (isBlurred ? 'blur(30px)' : 'blur(0)')};
+  left: -2px;
+  right: -2px;
+  top: -2px;
+  bottom: -2px;
+  pointer-events: none;
+  backdrop-filter: ${({ isBlurred }) => (isBlurred ? 'blur(8px)' : 'blur(0)')};
 `
 
 const VersionText = styled.div`

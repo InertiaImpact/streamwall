@@ -1,8 +1,28 @@
 import { ipcRenderer, webFrame } from 'electron'
 import throttle from 'lodash/throttle'
-import { ContentDisplayOptions } from 'streamwall-shared'
+import { ContentDisplayOptions, CropRect } from 'streamwall-shared'
 
 const SCAN_THROTTLE = 500
+
+type RendererErrorMessage = {
+  type: 'streamwall:hls-fatal'
+  reason: string
+  detail?: unknown
+  src?: string | null
+}
+
+function forwardRendererError(ev: MessageEvent) {
+  const data = ev.data as RendererErrorMessage
+  if (!data || typeof data !== 'object') {
+    return
+  }
+  if (data.type !== 'streamwall:hls-fatal') {
+    return
+  }
+  ipcRenderer.send('view-error', { error: data })
+}
+
+window.addEventListener('message', forwardRendererError)
 
 const VIDEO_OVERRIDE_STYLE = `
   * {
@@ -115,6 +135,56 @@ class RotationController {
   setCustom(rotation = 0) {
     this.customRotation = rotation
     this._update()
+  }
+}
+
+class CropController {
+  video: HTMLVideoElement
+  crop?: CropRect
+  resizeObserver: ResizeObserver
+
+  constructor(video: HTMLVideoElement) {
+    this.video = video
+    this.resizeObserver = new ResizeObserver(() => this.apply())
+    this.resizeObserver.observe(document.body)
+  }
+
+  setCrop(crop?: CropRect) {
+    this.crop = crop
+    this.apply()
+  }
+
+  apply() {
+    const crop = this.crop
+    if (!crop || !this.video.videoWidth || !this.video.videoHeight) {
+      this.video.style.setProperty('width', '100vw', 'important')
+      this.video.style.setProperty('height', '100vh', 'important')
+      this.video.style.removeProperty('transform')
+      this.video.style.removeProperty('transform-origin')
+      this.video.style.setProperty('object-fit', 'contain', 'important')
+      return
+    }
+
+    // Scale so the crop fully covers the container, then translate to the crop origin.
+    const containerWidth = window.innerWidth
+    const containerHeight = window.innerHeight
+    if (!containerWidth || !containerHeight) {
+      return
+    }
+
+    const scale = Math.max(containerWidth / crop.width, containerHeight / crop.height)
+    const targetWidth = this.video.videoWidth * scale
+    const targetHeight = this.video.videoHeight * scale
+
+    this.video.style.setProperty('width', `${targetWidth}px`, 'important')
+    this.video.style.setProperty('height', `${targetHeight}px`, 'important')
+    this.video.style.setProperty('object-fit', 'fill', 'important')
+    this.video.style.setProperty('transform-origin', 'top left', 'important')
+    this.video.style.setProperty(
+      'transform',
+      `translate(${-crop.x * scale}px, ${-crop.y * scale}px)`,
+      'important',
+    )
   }
 }
 
@@ -280,11 +350,18 @@ async function main() {
   ])
 
   let rotationController: RotationController | undefined
+  let cropController: CropController | undefined
+  const isLocalHlsPlayer = location.href.includes('playHLS.html')
+
   if (content.kind === 'video' || content.kind === 'audio') {
-    webFrame.insertCSS(VIDEO_OVERRIDE_STYLE, { cssOrigin: 'user' })
+    // Avoid overriding layout for the built-in HLS player so it can manage crop/transform itself.
+    if (!isLocalHlsPlayer) {
+      webFrame.insertCSS(VIDEO_OVERRIDE_STYLE, { cssOrigin: 'user' })
+    }
     const { info, video } = await findVideo(content.kind)
     if (content.kind === 'video' && video instanceof HTMLVideoElement) {
       rotationController = new RotationController(video)
+      cropController = new CropController(video)
     }
     ipcRenderer.send('view-info', { info })
   } else if (content.kind === 'web') {
@@ -296,6 +373,9 @@ async function main() {
   function updateOptions(options: ContentDisplayOptions) {
     if (rotationController) {
       rotationController.setCustom(options.rotation)
+    }
+    if (cropController) {
+      cropController.setCrop(options.crop)
     }
   }
   ipcRenderer.on('options', (ev, options) => updateOptions(options))

@@ -254,6 +254,18 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
                 console.error('failed to send client state delta', client)
               }
             }
+          } else if (msg.type === 'spotlight-state') {
+            // Forward spotlight state updates to all connected clients
+            for (const client of clients.values()) {
+              try {
+                if (client.ws.readyState !== WebSocket.OPEN) {
+                  continue
+                }
+                client.ws.send(JSON.stringify(msg))
+              } catch (err) {
+                console.error('failed to send spotlight update to client', client)
+              }
+            }
           }
         } catch (err) {
           console.error('Failed to handle ws message:', rawData, err)

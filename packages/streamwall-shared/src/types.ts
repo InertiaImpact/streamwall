@@ -15,6 +15,14 @@ export interface StreamWindowConfig {
 
 export interface ContentDisplayOptions {
   rotation?: number
+  crop?: CropRect
+}
+
+export interface CropRect {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 /** Metadata scraped from a loaded view */
@@ -36,6 +44,7 @@ export interface StreamDataContent extends ContentDisplayOptions {
   state?: string
   latitude?: number
   longitude?: number
+  crop?: CropRect
   _id?: string
   _dataSource?: string
   isLive?: boolean
@@ -48,7 +57,10 @@ export interface StreamData extends StreamDataContent {
 
 export type LocalStreamData = Omit<StreamData, '_id' | '_dataSource'>
 
-export type StreamList = StreamData[] & { byURL?: Map<string, StreamData> }
+export type StreamList = StreamData[] & {
+  byURL?: Map<string, StreamData[]>
+  byId?: Map<string, StreamData>
+}
 
 // matches viewStateMachine.ts
 export type ViewStateValue =
@@ -82,6 +94,7 @@ export interface GridState {
   config: StreamWindowConfig
   views: ViewState[]
   cellOffset: number
+  spotlightStreamId?: string | null
 }
 
 export interface StreamDelayStatus {
