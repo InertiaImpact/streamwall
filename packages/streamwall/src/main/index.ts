@@ -54,7 +54,7 @@ export interface StreamwallConfig {
     count: number
     positions?: Array<{ x?: number; y?: number }>
     window?: Array<{ x?: number; y?: number }>
-    instances?: Array<{ id?: string; index?: number; cols?: number; rows?: number; x?: number; y?: number; width?: number; height?: number }>
+    instances?: Array<{ id?: string; index?: number; cols?: number; rows?: number; x?: number; y?: number; width?: number; height?: number; frameless?: boolean; fullscreen?: boolean }>
   }
   window: {
     x?: number
@@ -62,6 +62,7 @@ export interface StreamwallConfig {
     width: number
     height: number
     frameless: boolean
+    fullscreen?: boolean
     'background-color': string
     'active-color': string
     grids?: Array<{ id?: string; index?: number; x?: number; y?: number }>
@@ -152,6 +153,7 @@ function parseArgs(): StreamwallConfig {
           'window.x',
           'window.y',
           'window.frameless',
+          'window.fullscreen',
           'window.background-color',
           'window.active-color',
         ],
@@ -172,6 +174,10 @@ function parseArgs(): StreamwallConfig {
         default: 1080,
       })
       .option('window.frameless', {
+        boolean: true,
+        default: false,
+      })
+      .option('window.fullscreen', {
         boolean: true,
         default: false,
       })
@@ -340,6 +346,8 @@ type GridInstanceConfig = {
   y?: number
   width?: number
   height?: number
+   frameless?: boolean
+   fullscreen?: boolean
 }
 
 function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
@@ -365,6 +373,8 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
     rows: defaultRows,
     x: g.x,
     y: g.y,
+    frameless: cfg.window.frameless,
+    fullscreen: cfg.window.fullscreen,
   }))
 
   const fromGridWindow = cfg.grid.window?.map((pos, idx) => ({
@@ -376,6 +386,8 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
     y: pos.y,
     width: cfg.window.width,
     height: cfg.window.height,
+    frameless: cfg.window.frameless,
+    fullscreen: cfg.window.fullscreen,
   }))
 
   const candidates = fromWindowGrids?.length ? fromWindowGrids : fromGridWindow ?? []
@@ -394,6 +406,8 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
       y: pos?.y,
       width: candidate?.width ?? cfg.window.width,
       height: candidate?.height ?? cfg.window.height,
+      frameless: candidate?.frameless ?? cfg.window.frameless,
+      fullscreen: candidate?.fullscreen ?? cfg.window.fullscreen,
     })
   }
 
@@ -445,6 +459,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
       y: g.y ?? 0,
       width: g.width ?? currentConfig.window.width,
       height: g.height ?? currentConfig.window.height,
+      frameless: g.frameless ?? currentConfig.window.frameless ?? false,
     })),
   }
 
@@ -469,6 +484,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
         const gridDefaults = { cols: currentConfig.grid.cols, rows: currentConfig.grid.rows }
         const primaryWidth = Number(payload.grids?.[0]?.width) || currentConfig.window.width
         const primaryHeight = Number(payload.grids?.[0]?.height) || currentConfig.window.height
+        const primaryFrameless = payload.grids?.[0]?.frameless ?? currentConfig.window.frameless
         const nextConfig: StreamwallConfig = {
           ...currentConfig,
           control: {
@@ -490,6 +506,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
               y: g.y === '' || g.y === undefined ? undefined : Number(g.y),
               width: Number(g.width) || primaryWidth,
               height: Number(g.height) || primaryHeight,
+              frameless: !!g.frameless,
             })),
             cols: Number(payload.grids?.[0]?.cols) || currentConfig.grid.cols,
             rows: Number(payload.grids?.[0]?.rows) || currentConfig.grid.rows,
@@ -499,6 +516,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
             ...currentConfig.window,
             width: primaryWidth,
             height: primaryHeight,
+            frameless: !!primaryFrameless,
             grids: undefined,
           },
         }
@@ -537,6 +555,9 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
         rows: currentConfig.grid.rows,
         x: 0,
         y: 0,
+        width: currentConfig.window.width,
+        height: currentConfig.window.height,
+        frameless: currentConfig.window.frameless ?? false,
       }
       const hiddenClass = idx >= 2 ? 'class="grid-row hidden"' : 'class="grid-row"'
       return `
@@ -549,6 +570,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
           <label>Y <input type="number" name="y-${idx}" value="${g.y}" /></label>
           <label>Width <input type="number" min="200" name="width-${idx}" value="${g.width}" /></label>
           <label>Height <input type="number" min="200" name="height-${idx}" value="${g.height}" /></label>
+          <label><input type="checkbox" name="frameless-${idx}" ${g.frameless ? 'checked' : ''} /> Borderless window</label>
         </fieldset>
       `
     }).join('')
@@ -611,7 +633,8 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
                 const y = document.querySelector('[name="y-' + i + '"]').value
                 const width = document.querySelector('[name="width-' + i + '"]').value
                 const height = document.querySelector('[name="height-' + i + '"]').value
-                grids.push({ id, cols, rows, x, y, width, height })
+                const frameless = document.querySelector('[name="frameless-' + i + '"]').checked
+                grids.push({ id, cols, rows, x, y, width, height, frameless })
               }
               return {
                 host: document.getElementById('host').value || '0.0.0.0',
@@ -659,11 +682,26 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       callback(false)
     })
 
-  // Prefer bundled storage (tokens) when available; fall back to userData for dev/runtime state
-  const bundledStoragePath = join(app.getAppPath(), 'storage.json')
-  const storagePath = fs.existsSync(bundledStoragePath)
-    ? bundledStoragePath
-    : join(app.getPath('userData'), 'streamwall-storage.json')
+  // Prefer bundled storage (tokens) when available; copy to userData so it is writable
+  const userStoragePath = join(app.getPath('userData'), 'streamwall-storage.json')
+  const storageCandidates = [
+    join(app.getAppPath(), 'storage.json'),
+    join(process.resourcesPath, 'storage.json'),
+    join(process.resourcesPath, 'app', 'storage.json'),
+    join(process.resourcesPath, '..', 'storage.json'),
+  ]
+  const bundledStoragePath = storageCandidates.find((p) => p && fs.existsSync(p))
+  if (bundledStoragePath && !fs.existsSync(userStoragePath)) {
+    try {
+      fs.copyFileSync(bundledStoragePath, userStoragePath)
+      console.log('Copied bundled storage to', userStoragePath)
+    } catch (err) {
+      console.warn('Failed to copy bundled storage; continuing with bundled path', err)
+    }
+  }
+  const storagePath = fs.existsSync(userStoragePath)
+    ? userStoragePath
+    : bundledStoragePath ?? userStoragePath
 
   const db = await loadStorage(storagePath)
 
@@ -683,7 +721,12 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined' && MAIN_WINDOW_VITE_DEV_SERVER_URL
           ? join(process.cwd(), 'packages/streamwall-control-client/dist')
           : null,
+        // Packed as extraResource -> resources/dist
+        join(app.getAppPath(), '../dist'),
+        join(process.resourcesPath, 'dist'),
+        // If we later change extraResource to keep parent folder
         join(app.getAppPath(), '../streamwall-control-client/dist'),
+        join(process.resourcesPath, 'streamwall-control-client', 'dist'),
         join(process.resourcesPath, 'control-client'),
       ].filter(Boolean) as string[]
 
@@ -705,11 +748,14 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       const storedToken = (db.data as any).streamwallToken as
         | { tokenId: string; secret: string }
         | undefined
-      if (!argv.control.endpoint && storedToken) {
+      if (storedToken) {
         const { tokenId, secret } = storedToken
         const wsBase = argv.control.address.replace(/^http/, 'ws')
-        argv.control.endpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
-        console.log('Auto-configured control endpoint:', argv.control.endpoint)
+        const derivedEndpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
+        if (!argv.control.endpoint || argv.control.endpoint !== derivedEndpoint) {
+          argv.control.endpoint = derivedEndpoint
+          console.log('Auto-configured control endpoint:', argv.control.endpoint)
+        }
       }
 
       console.log(`Control server started at ${argv.control.address}`)
@@ -752,6 +798,8 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           index: idx + 1,
           cols: argv.grid.cols,
           rows: argv.grid.rows,
+          frameless: argv.window.frameless,
+          fullscreen: argv.window.fullscreen,
         }))
 
   const desiredCount = Math.max(1, gridBaseCount)
@@ -773,6 +821,8 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       rows: argv.grid.rows,
       x: fallbackPositions[i]?.x,
       y: fallbackPositions[i]?.y,
+      frameless: argv.window.frameless,
+      fullscreen: argv.window.fullscreen,
     })
   }
 
@@ -801,6 +851,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       height,
       x,
       y,
+      frameless: instance.frameless ?? streamWindowConfig.frameless,
     }
 
     const runtime = {

@@ -9,6 +9,7 @@ export interface StreamWindowConfig {
   x?: number
   y?: number
   frameless: boolean
+  fullscreen?: boolean
   activeColor: string
   backgroundColor: string
 }

@@ -64,7 +64,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
 
     StreamWindow.ensureIPCHandlers()
 
-    const { width, height, x, y, frameless, backgroundColor } = this.config
+    const { width, height, x, y, frameless, fullscreen, backgroundColor } = this.config
     const win = new BrowserWindow({
       title: 'Streamwall',
       width,
@@ -72,11 +72,12 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       x,
       y,
       frame: !frameless,
+      fullscreen: !!fullscreen,
       backgroundColor,
       useContentSize: true,
       show: false,
     })
-    console.log('[grid] window created', { width, height, x, y, frameless })
+    console.log('[grid] window created', { width, height, x, y, frameless, fullscreen })
     win.removeMenu()
     win.loadURL('about:blank')
     win.on('ready-to-show', () => console.log('[grid] ready-to-show', { x: win.getBounds().x, y: win.getBounds().y }))
@@ -134,6 +135,17 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     })
     loadHTML(overlayView.webContents, 'overlay')
     this.overlayView = overlayView
+
+    const syncBounds = () => {
+      const bounds = win.getContentBounds()
+      backgroundView.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height })
+      overlayView.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height })
+    }
+    win.on('resize', syncBounds)
+    syncBounds()
+    if (fullscreen) {
+      win.once('ready-to-show', syncBounds)
+    }
 
     StreamWindow.registerSender(this.backgroundView.webContents.id, this)
     StreamWindow.registerSender(this.overlayView.webContents.id, this)

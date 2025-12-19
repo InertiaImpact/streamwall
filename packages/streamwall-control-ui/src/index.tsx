@@ -1499,12 +1499,37 @@ export function ControlUI({
         )}
         <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
           {cols != null && rows != null && (
-            <StyledGridContainer
-              className="grid"
-              onMouseMove={updateHoveringIdx}
-              windowWidth={windowWidth}
-              windowHeight={windowHeight}
+            <div
+              style={{
+                position: 'relative',
+                width: '100%',
+                maxWidth: '1200px',
+                margin: '0 auto',
+              }}
             >
+              <div
+                style={{
+                  position: 'relative',
+                  width: '100%',
+                  paddingBottom: `${(windowHeight / windowWidth) * 100}%`,
+                  background: '#0c111a',
+                  borderRadius: '12px',
+                  overflow: 'hidden',
+                  boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
+                }}
+              >
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                  }}
+                >
+                  <StyledGridContainer
+                    className="grid"
+                    onMouseMove={updateHoveringIdx}
+                    windowWidth={windowWidth}
+                    windowHeight={windowHeight}
+                  >
               <StyledGridInputs>
                 {range(0, rows).map((y) =>
                   range(0, cols).map((x) => {
@@ -1653,7 +1678,10 @@ export function ControlUI({
                   </>
                 )
               })()}
-            </StyledGridContainer>
+                  </StyledGridContainer>
+                </div>
+              </div>
+            </div>
           )}
           {/* Two-column section: Debug/Custom Streams on left, Map on right */}
           <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', paddingTop: '16px' }}>
