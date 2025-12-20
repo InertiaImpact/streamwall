@@ -444,6 +444,21 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
           } else if (msg.type === 'delete-token') {
             console.debug('Deleting token:', msg.tokenId)
             auth.deleteToken(msg.tokenId)
+          } else if (msg.type === 'quit') {
+            if (!roleCan(identity.role, 'quit')) {
+              console.warn(`Unauthorized attempt to "${msg.type}" by "${identity.name}"`)
+              respond({ error: 'unauthorized' })
+              return
+            }
+            console.debug('Forwarding quit command to streamwall')
+            if (currentStreamwallConn) {
+              streamwallConn.ws.send(
+                JSON.stringify({ ...msg, clientId: identity.tokenId }),
+              )
+              console.debug('Quit command sent to streamwall')
+            } else {
+              console.warn('Cannot forward quit command - no streamwall connection')
+            }
           } else {
             console.debug('Forwarding message to streamwall:', msg.type)
             if (currentStreamwallConn) {

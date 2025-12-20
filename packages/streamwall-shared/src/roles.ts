@@ -6,6 +6,7 @@ const adminActions = [
   'browse',
   'create-invite',
   'delete-token',
+  'quit',
 ] as const
 
 const operatorActions = [

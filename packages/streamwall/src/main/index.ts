@@ -1325,6 +1325,10 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           updateState({})
         }
         break
+      case 'quit':
+        console.warn('[control] quit command received; quitting app')
+        app.quit()
+        break
       default:
         console.warn('Unknown command type received:', msg.type)
     }

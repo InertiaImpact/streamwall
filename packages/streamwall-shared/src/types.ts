@@ -184,6 +184,7 @@ export type ControlCommand =
   | { type: 'export-streams-toml' }
   | { type: 'import-streams-toml' }
   | { type: 'spotlight'; url: string; gridId?: string }
+  | { type: 'quit' }
 
 export type ControlUpdate = {
   type: 'state'

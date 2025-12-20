@@ -683,8 +683,10 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
 
 export function ControlUI({
   connection,
+  enablePreviewScaling = false,
 }: {
   connection: StreamwallConnection
+  enablePreviewScaling?: boolean
 }) {
   const {
     isConnected,
@@ -752,6 +754,32 @@ export function ControlUI({
   const [showDebug, setShowDebug] = useState(false)
   const handleChangeShowDebug = useCallback(() => {
     setShowDebug((prev) => !prev)
+  }, [])
+
+  const isLocalControlPage = useMemo(() => {
+    const host = window.location.hostname
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+  }, [])
+
+  const [quitStage, setQuitStage] = useState<'hidden' | 'warn' | 'confirm'>(
+    'hidden',
+  )
+
+  const handleRequestQuit = useCallback(() => {
+    setQuitStage(isLocalControlPage ? 'confirm' : 'warn')
+  }, [isLocalControlPage])
+
+  const handleCancelQuit = useCallback(() => {
+    setQuitStage('hidden')
+  }, [])
+
+  const handleConfirmQuit = useCallback(() => {
+    send({ type: 'quit' })
+    setQuitStage('hidden')
+  }, [send])
+
+  const handleAcknowledgeRemoteQuit = useCallback(() => {
+    setQuitStage('confirm')
   }, [])
 
   const [spotlightedStreamId, setSpotlightedStreamId] = useState<string | undefined>()
@@ -1453,6 +1481,159 @@ export function ControlUI({
               <div>role: {role}</div>
             </>
           )}
+          {roleCan(role, 'quit') && (
+            <div
+              style={{
+                marginLeft: 'auto',
+                marginRight: 0,
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+              }}
+            >
+              {quitStage === 'warn' ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '10px',
+                    padding: '8px 12px',
+                    background: '#fff8e1',
+                    border: '1px solid #f6c343',
+                    borderRadius: '12px',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
+                    color: '#8a6d1d',
+                    maxWidth: '420px',
+                  }}
+                >
+                  <div style={{ flex: 1, fontSize: '12px', lineHeight: 1.35 }}>
+                    <strong>Are you sure?</strong> You will need to relaunch this on the machine itself; this page will no longer work.
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      onClick={handleAcknowledgeRemoteQuit}
+                      style={{
+                        background: '#f6c343',
+                        color: '#3f2e00',
+                        border: 'none',
+                        borderRadius: '10px',
+                        padding: '6px 10px',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                      title="Proceed to quit"
+                    >
+                      Continue
+                    </button>
+                    <button
+                      onClick={handleCancelQuit}
+                      style={{
+                        background: '#fff',
+                        color: '#1f2937',
+                        border: '1px solid #d1d5db',
+                        borderRadius: '10px',
+                        padding: '6px 10px',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                      }}
+                      title="Cancel quit"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : quitStage === 'confirm' ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    padding: '6px 10px',
+                    background: '#ffe3e3',
+                    border: '1px solid #f25f5c',
+                    borderRadius: '999px',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
+                    marginRight: 0,
+                  }}
+                >
+                  <span
+                    style={{
+                      color: '#b00020',
+                      fontWeight: 700,
+                      marginRight: 0,
+                    }}
+                  >
+                    Quit?
+                  </span>
+                  <button
+                    onClick={handleConfirmQuit}
+                    style={{
+                      background: '#d90429',
+                      color: '#fff',
+                      border: 'none',
+                      borderRadius: '999px',
+                      padding: '6px 12px',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                      marginRight: 0,
+                      boxShadow: '0 2px 8px rgba(217,4,41,0.25)',
+                    }}
+                    title="Quit Streamwall now"
+                  >
+                    Quit now
+                  </button>
+                  <button
+                    onClick={handleCancelQuit}
+                    style={{
+                      background: '#fff',
+                      color: '#1f2937',
+                      border: '1px solid #d1d5db',
+                      borderRadius: '999px',
+                      padding: '6px 10px',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      marginRight: 0,
+                    }}
+                    title="Cancel quit"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleRequestQuit}
+                  style={{
+                    marginLeft: 'auto',
+                    marginRight: 0,
+                    background: '#d90429',
+                    color: '#fff',
+                    border: 'none',
+                    borderRadius: '999px',
+                    width: '36px',
+                    height: '36px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    boxShadow: '0 4px 10px rgba(0,0,0,0.2)',
+                    cursor: 'pointer',
+                    transition: 'transform 120ms ease, box-shadow 120ms ease',
+                    fontSize: '16px',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'scale(1.05)'
+                    e.currentTarget.style.boxShadow = '0 6px 14px rgba(0,0,0,0.25)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'scale(1.0)'
+                    e.currentTarget.style.boxShadow = '0 4px 10px rgba(0,0,0,0.2)'
+                  }}
+                  title="Quit Streamwall"
+                >
+                  <FaTimes />
+                </button>
+              )}
+            </div>
+          )}
         </StyledHeader>
         {delayState && (
           <StreamDelayBox
@@ -1499,37 +1680,42 @@ export function ControlUI({
         )}
         <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
           {cols != null && rows != null && (
-            <div
-              style={{
-                position: 'relative',
-                width: '100%',
-                maxWidth: '1200px',
-                margin: '0 auto',
-              }}
-            >
-              <div
-                style={{
-                  position: 'relative',
-                  width: '100%',
-                  paddingBottom: `${(windowHeight / windowWidth) * 100}%`,
-                  background: '#0c111a',
-                  borderRadius: '12px',
-                  overflow: 'hidden',
-                  boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
-                }}
-              >
+            (() => {
+              const maxPreviewWidth = 1400
+              const safeWidth = Math.max(windowWidth, 1)
+              const scale = enablePreviewScaling
+                ? Math.min(1, maxPreviewWidth / safeWidth)
+                : 1
+              const previewWidth = safeWidth * scale
+              const previewHeight = windowHeight * scale
+              const gridScale = enablePreviewScaling ? scale : 1
+              return (
                 <div
                   style={{
-                    position: 'absolute',
-                    inset: 0,
+                    width: `${previewWidth}px`,
+                    height: `${previewHeight}px`,
+                    margin: '0 auto 12px',
+                    overflow: 'hidden',
                   }}
                 >
-                  <StyledGridContainer
-                    className="grid"
-                    onMouseMove={updateHoveringIdx}
-                    windowWidth={windowWidth}
-                    windowHeight={windowHeight}
+                  <div
+                    style={{
+                      position: 'relative',
+                      width: `${previewWidth}px`,
+                      height: `${previewHeight}px`,
+                      background: '#0c111a',
+                      borderRadius: '12px',
+                      overflow: 'hidden',
+                      boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
+                    }}
                   >
+                    <StyledGridContainer
+                      className="grid"
+                      onMouseMove={updateHoveringIdx}
+                      windowWidth={windowWidth}
+                      windowHeight={windowHeight}
+                      $scale={gridScale}
+                    >
               <StyledGridInputs>
                 {range(0, rows).map((y) =>
                   range(0, cols).map((x) => {
@@ -1678,10 +1864,11 @@ export function ControlUI({
                   </>
                 )
               })()}
-                  </StyledGridContainer>
+                    </StyledGridContainer>
+                  </div>
                 </div>
-              </div>
-            </div>
+              )
+            })()
           )}
           {/* Two-column section: Debug/Custom Streams on left, Map on right */}
           <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', paddingTop: '16px' }}>
@@ -3118,7 +3305,7 @@ const StyledHeader = styled.header`
     margin-bottom: 0;
   }
 
-  * {
+  > * {
     margin-right: 2rem;
   }
 `
@@ -3454,12 +3641,14 @@ const StyledGridControlsContainer = styled.div`
   }
 `
 
-const StyledGridContainer = styled.div.attrs(() => ({
-  scale: 0.75,
-}))`
+const StyledGridContainer = styled.div<{
+  windowWidth: number
+  windowHeight: number
+  $scale?: number
+}>`
   position: relative;
-  width: ${({ windowWidth, scale }) => windowWidth * scale}px;
-  height: ${({ windowHeight, scale }) => windowHeight * scale}px;
+  width: ${({ windowWidth, $scale = 1 }) => windowWidth * $scale}px;
+  height: ${({ windowHeight, $scale = 1 }) => windowHeight * $scale}px;
   border: 2px solid black;
   background: black;
 

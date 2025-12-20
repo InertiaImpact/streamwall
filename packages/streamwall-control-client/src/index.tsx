@@ -188,7 +188,7 @@ function App() {
   return (
     <>
       <GlobalStyle />
-      <ControlUI connection={connection} />
+      <ControlUI connection={connection} enablePreviewScaling />
     </>
   )
 }
