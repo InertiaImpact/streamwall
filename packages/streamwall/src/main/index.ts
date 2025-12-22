@@ -1735,6 +1735,10 @@ function init() {
   app.commandLine.appendSwitch('force-device-scale-factor', '1')
   // Allow media to autoplay without user gesture (packaged builds on new machines)
   app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+  // Keep renderers from being throttled when unfocused/occluded so streams stay smooth
+  app.commandLine.appendSwitch('disable-background-timer-throttling')
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
   app
     .whenReady()

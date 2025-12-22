@@ -346,6 +346,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
   const markersRef = useRef<Map<string, any>>(new Map())
   const hasInitialFitRef = useRef(false)
   const markersInitializedRef = useRef(false)
+  const lastInteractionWasShiftRef = useRef(false)
   const [mapReady, setMapReady] = useState(false)
   
   console.log('StreamLocationMap mounted with', streams.length, 'total streams')
@@ -481,8 +482,20 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
         const popup = L.popup().setContent(popupContent)
         marker.bindPopup(popup)
         
-        // Highlight in list when popup opens
-        marker.on('popupopen', () => {
+        // Track shift state as early as possible so popupopen can respect it
+        marker.on('mousedown', (ev: any) => {
+          const nativeEvt = ev?.originalEvent
+          const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
+          lastInteractionWasShiftRef.current = !!shiftPressed
+        })
+
+        // Highlight in list when popup opens unless the last interaction was a shift-click
+        marker.on('popupopen', (ev: any) => {
+          if (lastInteractionWasShiftRef.current) {
+            ev?.target?.closePopup?.()
+            lastInteractionWasShiftRef.current = false
+            return
+          }
           onStreamPreview(stream._id)
         })
 
@@ -495,12 +508,19 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
             ;(nativeEvt as any).__swHandled = true
           }
           const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
+          lastInteractionWasShiftRef.current = !!shiftPressed
           if (shiftPressed && onStreamAddToGrid) {
             nativeEvt?.preventDefault?.()
             nativeEvt?.stopPropagation?.()
+            marker.closePopup?.()
             onStreamAddToGrid(stream._id)
+            // Reset flag after the shift-click interaction completes so future clicks behave normally
+            setTimeout(() => {
+              lastInteractionWasShiftRef.current = false
+            }, 0)
             return
           }
+          lastInteractionWasShiftRef.current = false
           onStreamPreview(stream._id)
         }
 
