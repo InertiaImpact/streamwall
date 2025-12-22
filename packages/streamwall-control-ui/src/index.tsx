@@ -683,7 +683,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
 
 export function ControlUI({
   connection,
-  enablePreviewScaling = false,
+  enablePreviewScaling = true,
 }: {
   connection: StreamwallConnection
   enablePreviewScaling?: boolean
@@ -1681,7 +1681,8 @@ export function ControlUI({
         <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
           {cols != null && rows != null && (
             (() => {
-              const maxPreviewWidth = 1400
+              const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1400
+              const maxPreviewWidth = Math.max(480, Math.min(1400, viewportWidth - 48))
               const safeWidth = Math.max(windowWidth, 1)
               const scale = enablePreviewScaling
                 ? Math.min(1, maxPreviewWidth / safeWidth)
@@ -1741,6 +1742,7 @@ export function ControlUI({
                         onMouseDown={handleDragStart}
                         onFocus={setFocusedInputIdx}
                         onBlur={handleBlurInput}
+                        scale={gridScale}
                       />
                     )
                   }),
@@ -1787,7 +1789,7 @@ export function ControlUI({
                       }}
                     >
                       <StyledGridInfo>
-                        <StyledGridLabel>
+                        <StyledGridLabel $scale={gridScale}>
                           {isSpot ? streamId.toUpperCase() : streamId}
                         </StyledGridLabel>
                         {!isSpot && <div>{data?.source}</div>}
@@ -1832,6 +1834,7 @@ export function ControlUI({
                               width: `${(100 * pos.width) / windowWidth}%`,
                               height: `${(100 * pos.height) / windowHeight}%`,
                             }}
+                            scale={gridScale}
                             isDisplaying={matchesState('displaying', state.state)}
                             isListening={isListening}
                             isBackgroundListening={isBackgroundListening}
@@ -2581,6 +2584,7 @@ function GridInput({
   onMouseDown,
   onFocus,
   onBlur,
+  scale,
 }: {
   style: JSX.HTMLAttributes['style']
   onMouseDown: JSX.MouseEventHandler<HTMLInputElement>
@@ -2591,6 +2595,7 @@ function GridInput({
   role: StreamwallRole | null
   onFocus: (idx: number) => void
   onBlur: (idx: number) => void
+  scale?: number
 }) {
   const handleFocus = useCallback(() => {
     onFocus(idx)
@@ -2616,6 +2621,7 @@ function GridInput({
         onMouseDown={onMouseDown}
         onChange={handleChange}
         isEager
+        $scale={scale}
       />
     </StyledGridInputContainer>
   )
@@ -2625,6 +2631,7 @@ function GridControls({
   idx,
   streamId,
   style,
+  scale,
   isDisplaying,
   isListening,
   isBackgroundListening,
@@ -2651,6 +2658,7 @@ function GridControls({
   idx: number
   streamId: string
   style: JSX.HTMLAttributes['style']
+  scale?: number
   isDisplaying: boolean
   isListening: boolean
   isBackgroundListening: boolean
@@ -2722,6 +2730,7 @@ function GridControls({
     () => onDevTools(idx),
     [idx, onDevTools],
   )
+  const controlScale = Math.min(1, Math.max(0.7, scale ?? 1))
   return (
     <StyledGridControlsContainer style={style} onMouseDown={onMouseDown}>
       {isDisplaying && (
@@ -2729,17 +2738,17 @@ function GridControls({
           {showDebug ? (
             <>
               {roleCan(role, 'reload-view') && (
-                <StyledSmallButton onClick={handleReloadClick} tabIndex={1}>
+                <StyledSmallButton onClick={handleReloadClick} tabIndex={1} $scale={controlScale}>
                   <FaSyncAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'browse') && (
-                <StyledSmallButton onClick={handleBrowseClick} tabIndex={1}>
+                <StyledSmallButton onClick={handleBrowseClick} tabIndex={1} $scale={controlScale}>
                   <FaRegWindowMaximize />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'dev-tools') && (
-                <StyledSmallButton onClick={handleDevToolsClick} tabIndex={1}>
+                <StyledSmallButton onClick={handleDevToolsClick} tabIndex={1} $scale={controlScale}>
                   <FaRegLifeRing />
                 </StyledSmallButton>
               )}
@@ -2747,7 +2756,7 @@ function GridControls({
           ) : (
             <>
               {roleCan(role, 'reload-view') && (
-                <StyledSmallButton onClick={handleReloadClick} tabIndex={1}>
+                <StyledSmallButton onClick={handleReloadClick} tabIndex={1} $scale={controlScale}>
                   <FaSyncAlt />
                 </StyledSmallButton>
               )}
@@ -2756,17 +2765,18 @@ function GridControls({
                   isActive={isSwapping}
                   onClick={handleSwapClick}
                   tabIndex={1}
+                  $scale={controlScale}
                 >
                   <FaExchangeAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'rotate-stream') && (
-                <StyledSmallButton onClick={handleRotateClick} tabIndex={1}>
+                <StyledSmallButton onClick={handleRotateClick} tabIndex={1} $scale={controlScale}>
                   <FaRedoAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'mutate-state-doc') && (
-                <StyledSmallButton onClick={handleClearClick} tabIndex={1} title="Clear stream">
+                <StyledSmallButton onClick={handleClearClick} tabIndex={1} title="Clear stream" $scale={controlScale}>
                   <FaTimes />
                 </StyledSmallButton>
               )}
@@ -2782,6 +2792,7 @@ function GridControls({
             title="Spotlight stream (click to close)"
             isActive={spotlightedStreamId === streamId}
             activeColor="red"
+            $scale={controlScale}
           >
             <FaSearch />
           </StyledButton>
@@ -2791,6 +2802,7 @@ function GridControls({
             isActive={isBlurred}
             onClick={handleBlurClick}
             tabIndex={1}
+            $scale={controlScale}
           >
             <FaVideoSlash />
           </StyledButton>
@@ -2803,6 +2815,7 @@ function GridControls({
             }
             onClick={handleListeningClick}
             tabIndex={1}
+            $scale={controlScale}
           >
             <FaVolumeUp />
           </StyledButton>
@@ -3492,7 +3505,7 @@ const StyledLayoutCardInfo = styled.div`
   line-height: 1.2;
 `
 
-const StyledButton = styled.button`
+const StyledButton = styled.button<{ isActive?: boolean; activeColor?: string; $scale?: number }>`
   display: flex;
   align-items: center;
   border: 2px solid gray;
@@ -3500,6 +3513,19 @@ const StyledButton = styled.button`
   background: #ccc;
   border-radius: 5px;
   cursor: pointer;
+  ${({ $scale = 1 }) => {
+    const s = Math.min(1, Math.max(0.7, $scale))
+    const pad = Math.round(6 * s)
+    const bw = Math.max(1, Math.round(2 * s))
+    const radius = Math.max(3, Math.round(5 * s))
+    const iconSize = Math.max(10, Math.round(20 * s))
+    return `
+      padding: ${pad}px;
+      border-width: ${bw}px;
+      border-radius: ${radius}px;
+      svg { width: ${iconSize}px; height: ${iconSize}px; }
+    `
+  }}
 
   ${({ isActive, activeColor = 'red' }) =>
     isActive &&
@@ -3528,10 +3554,13 @@ const StyledButton = styled.button`
 `
 
 const StyledSmallButton = styled(StyledButton)`
-  svg {
-    width: 14px;
-    height: 14px;
-  }
+  ${({ $scale = 1 }) => {
+    const s = Math.min(1, Math.max(0.7, $scale))
+    const iconSize = Math.max(8, Math.round(14 * s))
+    return `
+      svg { width: ${iconSize}px; height: ${iconSize}px; }
+    `
+  }}
 `
 
 const StyledGridPreview = styled.div`
@@ -3578,8 +3607,9 @@ const StyledGridInfo = styled.div`
   text-align: center;
 `
 
-const StyledGridLabel = styled.div`
-  font-size: 30px;
+const StyledGridLabel = styled.div<{ $scale?: number }>`
+  font-size: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
+  line-height: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
   color: #333;
 `
 
@@ -3612,7 +3642,7 @@ const StyledGridButtons = styled.div`
   }
 `
 
-const StyledGridInput = styled(LazyChangeInput)`
+const StyledGridInput = styled(LazyChangeInput)<{ $scale?: number; color: string; isHighlighted: boolean }>`
   width: 100%;
   height: 100%;
   outline: 1px solid black;
@@ -3622,7 +3652,8 @@ const StyledGridInput = styled(LazyChangeInput)`
     isHighlighted
       ? Color(color).lightness(90).hsl().string()
       : Color(color).lightness(75).hsl().string()};
-  font-size: 20px;
+  font-size: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
+  line-height: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
   text-align: center;
 
   &:focus {
