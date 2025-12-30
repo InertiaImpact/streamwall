@@ -203,6 +203,7 @@ export interface CollabData {
   views: { [viewIdx: string]: { streamId: string | undefined } }
   uiState?: {
     loopRefreshErrored?: boolean
+    loopRefreshErroredByGrid?: Record<string, boolean>
     spotlightAssignments?: Record<string, string | null>
     spotlightedByGrid?: Record<string, string | null>
   }
@@ -873,25 +874,64 @@ export function ControlUI({
     send({ type: 'set-refresh-schedule', enabled: scheduleEnabled, time: next } as any)
   }, [scheduleEnabled, send])
 
-  const loopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
+  const loopRefreshErroredByGrid = sharedState?.uiState?.loopRefreshErroredByGrid ?? {}
+  const legacyLoopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
+  const loopRefreshTargetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id ?? null
+  const loopRefreshErrored = loopRefreshTargetGridId
+    ? loopRefreshErroredByGrid[loopRefreshTargetGridId] ?? legacyLoopRefreshErrored
+    : legacyLoopRefreshErrored
   const toggleLoopRefreshErrored = useCallback(() => {
-    stateDoc.transact(() => {
-      const uiStateMap = stateDoc.getMap<any>('uiState')
-      uiStateMap.set('loopRefreshErrored', !loopRefreshErrored)
-    })
-  }, [stateDoc, loopRefreshErrored])
-
-  useEffect(() => {
-    if (!loopRefreshErrored) {
+    const targetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id
+    if (!targetGridId) {
       return
     }
+    stateDoc.transact(() => {
+      const uiStateMap = stateDoc.getMap<any>('uiState')
+      let loopMap = uiStateMap.get('loopRefreshErroredByGrid') as
+        | Y.Map<boolean>
+        | undefined
+      if (!loopMap) {
+        loopMap = new Y.Map<boolean>()
+        uiStateMap.set('loopRefreshErroredByGrid', loopMap)
+      }
+      const next = !(loopMap.get(targetGridId) ?? false)
+      loopMap.set(targetGridId, next)
+      if (uiStateMap.has('loopRefreshErrored')) {
+        uiStateMap.delete('loopRefreshErrored')
+      }
+    })
+  }, [stateDoc, activeGridId, defaultGridId, grids])
 
-    const interval = setInterval(() => {
-      send({ type: 'refresh-errored-views' })
-    }, 5000) // Refresh every 5 seconds
+  useEffect(() => {
+    const intervals: number[] = []
 
-    return () => clearInterval(interval)
-  }, [loopRefreshErrored, send])
+    const loopTargets: Array<[string, boolean]> = Object.entries(
+      loopRefreshErroredByGrid,
+    )
+
+    if (loopTargets.length === 0 && legacyLoopRefreshErrored && loopRefreshTargetGridId) {
+      loopTargets.push([loopRefreshTargetGridId, true])
+    }
+
+    loopTargets.forEach(([gridId, enabled]) => {
+      if (!enabled) {
+        return
+      }
+      const interval = window.setInterval(() => {
+        send({ type: 'refresh-errored-views', gridId })
+      }, 5000)
+      intervals.push(interval)
+    })
+
+    return () => {
+      intervals.forEach(clearInterval)
+    }
+  }, [
+    loopRefreshErroredByGrid,
+    legacyLoopRefreshErrored,
+    loopRefreshTargetGridId,
+    send,
+  ])
 
   const toGlobalIdx = useCallback(
     (localIdx: number) => cellOffset + localIdx,

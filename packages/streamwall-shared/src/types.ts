@@ -135,6 +135,12 @@ export interface StreamwallState {
     enabled: boolean
     time: string // HH:mm in local time
   }
+  uiState?: {
+    loopRefreshErrored?: boolean
+    loopRefreshErroredByGrid?: Record<string, boolean>
+    spotlightAssignments?: Record<string, string | null>
+    spotlightedByGrid?: Record<string, string | null>
+  }
   grids?: GridState[]
   savedLayouts?: Record<
     string,
