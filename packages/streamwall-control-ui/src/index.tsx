@@ -48,7 +48,7 @@ import { matchesState } from 'xstate'
 import * as Y from 'yjs'
 import './index.css'
 
-// Leaflet types for global window
+// Leaflet types for global window test
 declare global {
   interface Window {
     L: any
