@@ -41,6 +41,8 @@ if (!VERBOSE_LOG) {
 export interface StreamwallConfig {
   help: boolean
   /** Skip the first-run config wizard (CLI-only flag) */
+  'skip-setup'?: boolean
+  /** Legacy camelCase alias for skip-setup */
   skipSetup?: boolean
   maintenance?: {
     'refresh-all'?: {
@@ -416,7 +418,9 @@ function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
 
 function pruneUndefined<T>(value: T): T {
   if (Array.isArray(value)) {
-    return value.map((item) => pruneUndefined(item)) as unknown as T
+    return value
+      .map((item) => pruneUndefined(item))
+      .filter((item) => item !== undefined) as unknown as T
   }
   if (value && typeof value === 'object') {
     const result: Record<string, unknown> = {}
@@ -429,6 +433,154 @@ function pruneUndefined<T>(value: T): T {
     return result as unknown as T
   }
   return value
+}
+
+function normalizeNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.replace(/_/g, ''))
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined
+  return !!value
+}
+
+function canonicalizeConfigForSave(config: StreamwallConfig) {
+  const skipSetup = (config as any)['skip-setup'] ?? (config as any).skipSetup
+  const refreshAll = config.maintenance?.['refresh-all'] ?? (config as any).maintenance?.refreshAll
+
+  const gridInstances = config.grid.instances?.map((g) =>
+    pruneUndefined({
+      id: g.id,
+      index: normalizeNumber(g.index),
+      cols: normalizeNumber(g.cols),
+      rows: normalizeNumber(g.rows),
+      x: normalizeNumber(g.x),
+      y: normalizeNumber(g.y),
+      width: normalizeNumber(g.width),
+      height: normalizeNumber(g.height),
+      frameless: normalizeBoolean(g.frameless),
+      fullscreen: normalizeBoolean(g.fullscreen),
+    }),
+  )
+
+  const windowGrids = config.window.grids?.map((g) =>
+    pruneUndefined({
+      id: g.id,
+      index: normalizeNumber(g.index),
+      x: normalizeNumber(g.x),
+      y: normalizeNumber(g.y),
+    }),
+  )
+
+  const dataSection = (config.data as any) ?? {}
+  const controlSection = (config.control as any) ?? {}
+  const twitchSection = (config.twitch as any) ?? {}
+
+  return pruneUndefined({
+    'skip-setup': normalizeBoolean(skipSetup),
+    maintenance: refreshAll
+      ? {
+          'refresh-all': {
+            enabled: normalizeBoolean(refreshAll.enabled) ?? false,
+            time: refreshAll.time ?? '02:00',
+          },
+        }
+      : undefined,
+    grid: {
+      cols: normalizeNumber(config.grid.cols),
+      rows: normalizeNumber(config.grid.rows),
+      count: normalizeNumber(config.grid.count),
+      positions: config.grid.positions?.map((p) =>
+        pruneUndefined({ x: normalizeNumber(p.x), y: normalizeNumber(p.y) }),
+      ),
+      window: (config.grid as any).window?.map((p: any) =>
+        pruneUndefined({ x: normalizeNumber(p.x), y: normalizeNumber(p.y) }),
+      ),
+      instances: gridInstances,
+    },
+    window: {
+      x: normalizeNumber(config.window.x),
+      y: normalizeNumber(config.window.y),
+      width: normalizeNumber(config.window.width),
+      height: normalizeNumber(config.window.height),
+      frameless: normalizeBoolean(config.window.frameless),
+      fullscreen: normalizeBoolean(config.window.fullscreen),
+      'background-color': (config.window as any)['background-color'] ?? (config.window as any).backgroundColor,
+      'active-color': (config.window as any)['active-color'] ?? (config.window as any).activeColor,
+      grids: windowGrids,
+    },
+    data: {
+      interval: normalizeNumber(config.data.interval),
+      'json-url': dataSection['json-url'] ?? dataSection.jsonUrl ?? [],
+      'toml-file': dataSection['toml-file'] ?? dataSection.tomlFile ?? [],
+    },
+    streamdelay: {
+      endpoint: (config.streamdelay as any)?.endpoint,
+      key: (config.streamdelay as any)?.key ?? null,
+    },
+    control: {
+      endpoint: controlSection.endpoint ?? null,
+      'auto-start-server': normalizeBoolean(
+        controlSection['auto-start-server'] ?? controlSection.autoStartServer,
+      ),
+      enabled: normalizeBoolean(controlSection.enabled),
+      address: controlSection.address,
+      token: controlSection.token,
+      hostname: controlSection.hostname,
+      port: normalizeNumber(controlSection.port),
+      username: controlSection.username,
+      password: controlSection.password,
+    },
+    twitch: {
+      channel: twitchSection.channel ?? null,
+      username: twitchSection.username ?? null,
+      token: twitchSection.token ?? null,
+      color: twitchSection.color,
+      announce: twitchSection.announce
+        ? {
+            template: twitchSection.announce.template,
+            interval: normalizeNumber(twitchSection.announce.interval),
+            delay: normalizeNumber(twitchSection.announce.delay),
+          }
+        : undefined,
+      vote: twitchSection.vote
+        ? {
+            template: twitchSection.vote.template,
+            interval: normalizeNumber(twitchSection.vote.interval),
+          }
+        : undefined,
+    },
+    telemetry: {
+      sentry: normalizeBoolean((config.telemetry as any)?.sentry),
+    },
+  })
+}
+
+function stringifyCanonicalConfig(config: StreamwallConfig) {
+  const serializableConfig = canonicalizeConfigForSave(config)
+  const rawToml = TOML.stringify(serializableConfig as any)
+  // Strip numeric underscores that @iarna/toml emits for readability
+  return rawToml.replace(/\b\d[\d_]*\b/g, (num) => num.replace(/_/g, ''))
+}
+
+function persistCanonicalConfigIfPresent(config: StreamwallConfig) {
+  const configPath = join(app.getPath('userData'), 'config.toml')
+  if (!fs.existsSync(configPath)) {
+    return
+  }
+
+  try {
+    fs.writeFileSync(configPath, stringifyCanonicalConfig(config))
+    console.debug('[config] canonicalized and saved to', configPath)
+  } catch (err) {
+    console.warn('[config] failed to canonicalize config', err)
+  }
 }
 
 async function openConfigWizard(currentConfig: StreamwallConfig) {
@@ -530,8 +682,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
         delete (cleanedConfig.grid as any).positions
         delete (cleanedConfig.window as any).grids
 
-        const serializableConfig = pruneUndefined(cleanedConfig)
-        fs.writeFileSync(configPath, TOML.stringify(serializableConfig as any))
+        fs.writeFileSync(configPath, stringifyCanonicalConfig(cleanedConfig))
         console.log('[wizard] Saved config to', configPath)
         resolve({ launch: !!payload.launch })
       } catch (err) {
@@ -675,6 +826,9 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
 
 async function main(argv: ReturnType<typeof parseArgs>) {
   console.log('[main] starting with grid.count', argv.grid.count, 'instances', argv.grid.instances?.length)
+
+  // Clean up any legacy/camelCase/underscored numeric values in config on startup
+  persistCanonicalConfigIfPresent(argv)
   // Reject all permission requests from web content.
   session
     .fromPartition('persist:session')
@@ -1476,8 +1630,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         },
       },
     }
-    const serializableConfig = pruneUndefined(next)
-    fs.writeFileSync(configPath, TOML.stringify(serializableConfig as any))
+    fs.writeFileSync(configPath, stringifyCanonicalConfig(next))
     console.debug('[schedule] persisted refresh schedule to config', configPath)
   }
 

@@ -877,8 +877,9 @@ export function ControlUI({
   const loopRefreshErroredByGrid = sharedState?.uiState?.loopRefreshErroredByGrid ?? {}
   const legacyLoopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
   const loopRefreshTargetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id ?? null
+  const hasPerGridLoop = Object.keys(loopRefreshErroredByGrid).length > 0
   const loopRefreshErrored = loopRefreshTargetGridId
-    ? loopRefreshErroredByGrid[loopRefreshTargetGridId] ?? legacyLoopRefreshErrored
+    ? (hasPerGridLoop ? !!loopRefreshErroredByGrid[loopRefreshTargetGridId] : legacyLoopRefreshErrored)
     : legacyLoopRefreshErrored
   const toggleLoopRefreshErrored = useCallback(() => {
     const targetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id
@@ -909,7 +910,7 @@ export function ControlUI({
       loopRefreshErroredByGrid,
     )
 
-    if (loopTargets.length === 0 && legacyLoopRefreshErrored && loopRefreshTargetGridId) {
+    if (!hasPerGridLoop && legacyLoopRefreshErrored && loopRefreshTargetGridId) {
       loopTargets.push([loopRefreshTargetGridId, true])
     }
 
