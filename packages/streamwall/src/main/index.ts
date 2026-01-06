@@ -249,6 +249,16 @@ function parseArgs(): StreamwallConfig {
         number: true,
         default: 3000,
       })
+      .option('control.token-id', {
+        describe:
+          'Optional override for the streamwall token id (use when connecting to an external control server)',
+        default: null,
+      })
+      .option('control.token-secret', {
+        describe:
+          'Optional override for the streamwall token secret (use when connecting to an external control server)',
+        default: null,
+      })
       .option('control.username', {
         describe: 'Control server admin username',
         default: 'streamwall',
@@ -859,12 +869,43 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   const db = await loadStorage(storagePath)
 
+  const configuredToken = (() => {
+    const explicitId = argv.control['token-id'] as string | null
+    const explicitSecret = argv.control['token-secret'] as string | null
+
+    if (explicitId && explicitSecret) {
+      return { tokenId: explicitId, secret: explicitSecret }
+    }
+
+    const combined = argv.control.token as string | null
+    if (combined && combined.includes(':')) {
+      const [tokenId, secret] = combined.split(':', 2)
+      if (tokenId && secret) {
+        return { tokenId, secret }
+      }
+    }
+
+    return (db.data as any).streamwallToken as
+      | { tokenId: string; secret: string }
+      | undefined
+  })()
+
   // Start control server if auto-start is enabled
   if (argv.control.enabled && argv.control['auto-start-server']) {
     console.log('Auto-starting control server...')
     try {
       // Ensure control server shares the same storage (tokens) as the app
       process.env.DB_PATH = storagePath
+
+      // If a token override was provided, persist it so the control server and client match
+      if (
+        configuredToken &&
+        JSON.stringify(db.data.streamwallToken) !== JSON.stringify(configuredToken)
+      ) {
+        db.update((data) => {
+          data.streamwallToken = configuredToken
+        })
+      }
 
       // Resolve control UI static assets with fallbacks for dev and packaged builds
       const staticCandidates = [
@@ -899,11 +940,9 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       })
 
       // If no explicit endpoint was provided, derive it from the shared token
-      const storedToken = (db.data as any).streamwallToken as
-        | { tokenId: string; secret: string }
-        | undefined
-      if (storedToken) {
-        const { tokenId, secret } = storedToken
+      const tokenForEndpoint = configuredToken
+      if (tokenForEndpoint) {
+        const { tokenId, secret } = tokenForEndpoint
         const wsBase = argv.control.address.replace(/^http/, 'ws')
         const derivedEndpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
         if (!argv.control.endpoint || argv.control.endpoint !== derivedEndpoint) {
@@ -1730,6 +1769,15 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       console.warn('Stream window closed; quitting app.')
       app.quit()
     })
+  }
+
+  // If we weren't able to derive the control endpoint earlier (e.g., auto-start disabled),
+  // try to compute it now from the configured IP/token so remote setups still connect.
+  if (!argv.control.endpoint && configuredToken && argv.control.address) {
+    const { tokenId, secret } = configuredToken
+    const wsBase = argv.control.address.replace(/^http/, 'ws')
+    argv.control.endpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
+    console.log('Configured control endpoint:', argv.control.endpoint)
   }
 
   if (argv.control.endpoint) {

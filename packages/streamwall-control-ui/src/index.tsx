@@ -348,7 +348,14 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
   const hasInitialFitRef = useRef(false)
   const markersInitializedRef = useRef(false)
   const lastInteractionWasShiftRef = useRef(false)
+  const onStreamAddToGridRef = useRef(onStreamAddToGrid)
+  const onStreamPreviewRef = useRef(onStreamPreview)
   const [mapReady, setMapReady] = useState(false)
+
+  useEffect(() => {
+    onStreamAddToGridRef.current = onStreamAddToGrid
+    onStreamPreviewRef.current = onStreamPreview
+  }, [onStreamAddToGrid, onStreamPreview])
   
   console.log('StreamLocationMap mounted with', streams.length, 'total streams')
   if (streams.length > 0) {
@@ -497,7 +504,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
             lastInteractionWasShiftRef.current = false
             return
           }
-          onStreamPreview(stream._id)
+          onStreamPreviewRef.current?.(stream._id)
         })
 
         const handleMarkerActivate = (ev: any) => {
@@ -510,11 +517,11 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
           }
           const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
           lastInteractionWasShiftRef.current = !!shiftPressed
-          if (shiftPressed && onStreamAddToGrid) {
+          if (shiftPressed && onStreamAddToGridRef.current) {
             nativeEvt?.preventDefault?.()
             nativeEvt?.stopPropagation?.()
             marker.closePopup?.()
-            onStreamAddToGrid(stream._id)
+            onStreamAddToGridRef.current(stream._id)
             // Reset flag after the shift-click interaction completes so future clicks behave normally
             setTimeout(() => {
               lastInteractionWasShiftRef.current = false
@@ -522,7 +529,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
             return
           }
           lastInteractionWasShiftRef.current = false
-          onStreamPreview(stream._id)
+          onStreamPreviewRef.current?.(stream._id)
         }
 
         // Handle click; boxZoom is disabled so shift+click won't trigger zoom
@@ -1079,11 +1086,15 @@ export function ControlUI({
   const handleSetView = useCallback(
     (idx: number, streamId: string) => {
       // Allow spot placeholders (spot-1, spot-2, etc.) or any custom streamId
-      // Even if they're not in the streams array, we still add them to the grid
-      stateDoc
-        .getMap<Y.Map<string | undefined>>('views')
-        .get(String(toGlobalIdx(idx)))
-        ?.set('streamId', streamId)
+      // Ensure the view entry exists before setting, so multi-grid writes succeed
+      const viewsMap = stateDoc.getMap<Y.Map<string | undefined>>('views')
+      const globalIdx = toGlobalIdx(idx)
+      let viewEntry = viewsMap.get(String(globalIdx))
+      if (!viewEntry) {
+        viewEntry = new Y.Map<string | undefined>()
+        viewsMap.set(String(globalIdx), viewEntry)
+      }
+      viewEntry.set('streamId', streamId)
     },
     [stateDoc, toGlobalIdx],
   )
@@ -1252,36 +1263,99 @@ export function ControlUI({
     send({ type: 'import-streams-toml' })
   }, [send])
 
+  // Map grid id -> layout metadata so we can target the selected grid when adding streams from the map/list
+  const gridMetaById = useMemo(() => {
+    if (!grids || grids.length === 0) return new Map<string, { cols: number; rows: number; cellOffset: number }>()
+    return new Map(
+      grids.map((g) => [g.id, { cols: g.config.cols, rows: g.config.rows, cellOffset: g.cellOffset }]),
+    )
+  }, [grids])
+
   const handleClickId = useCallback(
     (streamId: string) => {
-      if (cols == null || rows == null || sharedState == null) {
+      console.log('handleClickId start', {
+        activeGridId,
+        defaultGridId,
+        gridMetaKeys: Array.from(gridMetaById.keys()),
+        gridsCount: grids?.length ?? 0,
+      })
+
+      // Pick the currently selected grid (or first available) to target
+      const targetMeta =
+        (activeGridId && gridMetaById.get(activeGridId)) ||
+        gridMetaById.values().next().value ||
+        (cols != null && rows != null ? { cols, rows, cellOffset } : null)
+
+      const targetGridId =
+        (activeGridId && gridMetaById.has(activeGridId) && activeGridId) ||
+        (gridMetaById.size > 0 ? Array.from(gridMetaById.keys())[0] : null)
+
+      if (!targetMeta || sharedState == null) {
+        console.log('handleClickId aborted', {
+          hasTargetMeta: !!targetMeta,
+          hasSharedState: sharedState != null,
+          activeGridId,
+          gridMetaKeys: Array.from(gridMetaById.keys()),
+        })
         return
       }
 
-      try {
-        navigator.clipboard.writeText(streamId)
-      } catch (err) {
-        console.warn('Unable to copy stream id to clipboard:', err)
+      const { cols: targetCols, rows: targetRows, cellOffset: targetOffset } = targetMeta
+      const toGlobal = (idx: number) => targetOffset + idx
+
+      if (navigator?.clipboard?.writeText) {
+        navigator.clipboard.writeText(streamId).catch((err) => {
+          console.warn('Unable to copy stream id to clipboard:', err)
+        })
+      } else {
+        console.warn('Clipboard API not available; skipping copy')
+      }
+
+      const setStreamAt = (idx: number) => {
+        const viewsMap = stateDoc.getMap<Y.Map<string | undefined>>('views')
+        const globalIdx = toGlobal(idx)
+        let viewEntry = viewsMap.get(String(globalIdx))
+        if (!viewEntry) {
+          viewEntry = new Y.Map<string | undefined>()
+          viewsMap.set(String(globalIdx), viewEntry)
+        }
+        viewEntry.set('streamId', streamId)
       }
 
       if (focusedInputIdx !== undefined) {
-        handleSetView(focusedInputIdx, streamId)
+        console.log('handleClickId placing via focused input', {
+          targetGridId,
+          focusedInputIdx,
+          globalIdx: toGlobal(focusedInputIdx),
+        })
+        setStreamAt(focusedInputIdx)
         return
       }
 
       const viewsMap = getViewsMap()
-      const availableIdx = range(cols * rows).find((i) => {
-        const globalIdx = toGlobalIdx(i)
+      const availableIdx = range(targetCols * targetRows).find((i) => {
+        const globalIdx = toGlobal(i)
         const viewEntry = viewsMap.get(String(globalIdx))
         const streamIdAtIdx = viewEntry?.get('streamId') ?? getSharedStreamId(globalIdx)
         return !streamIdAtIdx
       })
       if (availableIdx === undefined) {
+        console.log('handleClickId no empty slot', {
+          targetGridId,
+          targetCols,
+          targetRows,
+          targetOffset,
+        })
         return
       }
-      handleSetView(availableIdx, streamId)
+      console.log('handleClickId placing via first empty slot', {
+        targetGridId,
+        availableIdx,
+        globalIdx: toGlobal(availableIdx),
+      })
+      setStreamAt(availableIdx)
     },
-    [cols, rows, sharedState, focusedInputIdx, toGlobalIdx, getSharedStreamId, handleSetView, getViewsMap],
+    [activeGridId, defaultGridId, gridMetaById, grids, cols, rows, cellOffset, sharedState, focusedInputIdx, getSharedStreamId, getViewsMap, stateDoc],
   )
 
   const handleSwapWithSpot = useCallback(
