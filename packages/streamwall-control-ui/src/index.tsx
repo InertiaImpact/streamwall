@@ -16,15 +16,12 @@ import { useHotkeys } from 'react-hotkeys-hook'
 import {
   FaExchangeAlt,
   FaFolder,
-  FaCog,
   FaRedoAlt,
   FaRegLifeRing,
   FaRegWindowMaximize,
   FaSearch,
   FaSyncAlt,
   FaTimes,
-  FaDownload,
-  FaUpload,
   FaVideoSlash,
   FaVolumeUp,
 } from 'react-icons/fa'
@@ -48,7 +45,7 @@ import { matchesState } from 'xstate'
 import * as Y from 'yjs'
 import './index.css'
 
-// Leaflet types for global window test
+// Leaflet types for global window
 declare global {
   interface Window {
     L: any
@@ -92,9 +89,6 @@ const hotkeyTriggers = [
   'p',
 ]
 
-// Soft palette for grids; index-based lookup
-const GRID_PALETTE = ['#4c7df0', '#f27f7f', '#4dbd82', '#f2c14f', '#a76de2']
-
 export const GlobalStyle = createGlobalStyle`
   html {
     height: 100%;
@@ -114,28 +108,6 @@ function filterStreams(
   highwayFilters: Set<string>,
   cityFilters: Set<string>,
 ) {
-  const matchesLocationFilters = (label?: string | null) => {
-    if (!label) return highwayFilters.size === 0 && cityFilters.size === 0
-
-    if (highwayFilters.size > 0) {
-      const matchesHighway = Array.from(highwayFilters).some((highway) =>
-        label.includes(highway),
-      )
-      if (!matchesHighway) return false
-    }
-
-    if (cityFilters.size > 0) {
-      const matchesCity = Array.from(cityFilters).some((city) => {
-        if (label.startsWith(city + ' -')) return true
-        const cityPattern = new RegExp(`^\\d*${city}\\w* -`, 'i')
-        return cityPattern.test(label)
-      })
-      if (!matchesCity) return false
-    }
-
-    return true
-  }
-
   const wallStreams = []
   const liveStreams = []
   const otherStreams = []
@@ -152,17 +124,39 @@ function filterStreams(
     ) {
       continue
     }
-
-    // Apply highway/city filters to all categories
-    if ((highwayFilters.size > 0 || cityFilters.size > 0) && !matchesLocationFilters(label)) {
-      continue
-    }
     
     if (wallStreamIds.has(_id)) {
       wallStreams.push(stream)
     } else if ((kind && kind !== 'video') || status === 'Live') {
       liveStreams.push(stream)
     } else {
+      // Apply static filter logic for offline streams
+      if ((highwayFilters.size > 0 || cityFilters.size > 0) && label) {
+        let matchesFilters = true
+        
+        // If highway filters are selected, check if stream contains any of them
+        if (highwayFilters.size > 0) {
+          const matchesHighway = Array.from(highwayFilters).some(highway => 
+            label.includes(highway)
+          )
+          if (!matchesHighway) matchesFilters = false
+        }
+        
+        // If city filters are selected, check if stream starts with any of them
+        if (cityFilters.size > 0) {
+          const matchesCity = Array.from(cityFilters).some(city => {
+            // Check for exact matches like "CR -", "IC -", etc.
+            if (label.startsWith(city + ' -')) return true
+            
+            // Check for variations with digits like "6DT -", "6DW -", etc.
+            const cityPattern = new RegExp(`^\\d*${city}\\w* -`, 'i')
+            return cityPattern.test(label)
+          })
+          if (!matchesCity) matchesFilters = false
+        }
+        
+        if (!matchesFilters) continue
+      }
       otherStreams.push(stream)
     }
   }
@@ -201,12 +195,7 @@ export function useYDoc<T>(keys: string[]): {
 
 export interface CollabData {
   views: { [viewIdx: string]: { streamId: string | undefined } }
-  uiState?: {
-    loopRefreshErrored?: boolean
-    loopRefreshErroredByGrid?: Record<string, boolean>
-    spotlightAssignments?: Record<string, string | null>
-    spotlightedByGrid?: Record<string, string | null>
-  }
+  uiState?: { loopRefreshErrored?: boolean }
 }
 
 export interface StreamwallConnection {
@@ -224,15 +213,6 @@ export interface StreamwallConnection {
   delayState: StreamDelayStatus | null | undefined
   authState?: StreamwallState['auth']
   savedLayouts?: StreamwallState['savedLayouts']
-  grids?: Array<{
-    id: string
-    config: StreamWindowConfig
-    views: ViewInfo[]
-    stateIdxMap: Map<number, ViewInfo>
-    cellOffset: number
-    spotlightStreamId?: string | null
-  }>
-  defaultGridId?: string | null
 }
 
 export function useStreamwallState(state: StreamwallState | undefined) {
@@ -248,10 +228,6 @@ export function useStreamwallState(state: StreamwallState | undefined) {
         delayState: undefined,
         authState: undefined,
         savedLayouts: undefined,
-        grids: [],
-        defaultGridId: null,
-        overlayLabelFontSize: 16,
-        refreshSchedule: { enabled: false, time: '02:00' },
       }
     }
 
@@ -260,73 +236,56 @@ export function useStreamwallState(state: StreamwallState | undefined) {
       auth,
       config,
       streams: stateStreams,
-      customStreams: stateCustomStreams,
       views: stateViews,
       streamdelay,
       savedLayouts,
-      grids,
-      overlayLabelFontSize,
-      refreshSchedule,
     } = state
-
-    const buildViewInfo = (viewStates: ViewState[]) => {
-      const stateIdxMap = new Map<number, ViewInfo>()
-      const viewInfos: ViewInfo[] = []
-      for (const viewState of viewStates) {
-        const { pos } = viewState.context
-        const isListening = matchesState(
-          'displaying.running.audio.listening',
-          viewState.state,
-        )
-        const isBackgroundListening = matchesState(
-          'displaying.running.audio.background',
-          viewState.state,
-        )
-        const isBlurred = matchesState(
-          'displaying.running.video.blurred',
-          viewState.state,
-        )
-        const spaces = pos?.spaces ?? []
-        const info: ViewInfo = {
-          state: viewState,
-          isListening,
-          isBackgroundListening,
-          isBlurred,
-          spaces,
-        }
-        viewInfos.push(info)
-        for (const space of spaces) {
-          stateIdxMap.set(space, info)
-        }
+    const stateIdxMap = new Map()
+    const views = []
+    for (const viewState of stateViews) {
+      const { pos } = viewState.context
+      const isListening = matchesState(
+        'displaying.running.audio.listening',
+        viewState.state,
+      )
+      const isBackgroundListening = matchesState(
+        'displaying.running.audio.background',
+        viewState.state,
+      )
+      const isBlurred = matchesState(
+        'displaying.running.video.blurred',
+        viewState.state,
+      )
+      const spaces = pos?.spaces ?? []
+      const viewInfo = {
+        state: viewState,
+        isListening,
+        isBackgroundListening,
+        isBlurred,
+        spaces,
       }
-      return { viewInfos, stateIdxMap }
+      views.push(viewInfo)
+      for (const space of spaces) {
+        if (!stateIdxMap.has(space)) {
+          stateIdxMap.set(space, {})
+        }
+        Object.assign(stateIdxMap.get(space), viewInfo)
+      }
     }
 
-    const gridStatesSource = grids?.length
-      ? grids
-      : [{ id: 'grid-1', config, views: stateViews, cellOffset: 0 }]
-
-    const enhancedGrids = gridStatesSource.map((grid) => {
-      const { viewInfos, stateIdxMap } = buildViewInfo(grid.views)
-      return { ...grid, views: viewInfos, stateIdxMap }
-    })
-
-    const primaryGrid = enhancedGrids[0]
+    const streams = sortBy(stateStreams, ['_id'])
+    const customStreams = stateStreams.filter((s) => s._dataSource === 'custom')
 
     return {
       role,
-      config: primaryGrid?.config,
-      streams: stateStreams,
-      customStreams: stateCustomStreams ?? [],
-      views: primaryGrid?.views ?? [],
-      stateIdxMap: primaryGrid?.stateIdxMap ?? new Map(),
-      delayState: streamdelay,
       authState: auth,
+      delayState: streamdelay,
+      views,
+      config,
+      streams,
+      customStreams,
+      stateIdxMap,
       savedLayouts,
-      grids: enhancedGrids,
-      defaultGridId: state.grids?.[0]?.id ?? enhancedGrids[0]?.id ?? null,
-      overlayLabelFontSize,
-      refreshSchedule,
     }
   }, [state])
 }
@@ -336,37 +295,22 @@ import 'leaflet/dist/leaflet.css'
 // ...existing code...
 
 // Leaflet.js map component - works reliably in web browser environment
-function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddToGrid }: { 
+function StreamLocationMap({ streams, wallStreams, onStreamPreview }: { 
   streams: StreamData[], 
   wallStreams: StreamData[],
-  onStreamPreview: (streamId: string) => void,
-  onStreamAddToGrid?: (streamId: string) => void
+  onStreamPreview: (streamId: string) => void
 }) {
   const mapRef = useRef<HTMLDivElement>(null)
   const leafletMapRef = useRef<any>(null)
   const markersRef = useRef<Map<string, any>>(new Map())
   const hasInitialFitRef = useRef(false)
   const markersInitializedRef = useRef(false)
-  const lastInteractionWasShiftRef = useRef(false)
-  const onStreamAddToGridRef = useRef(onStreamAddToGrid)
-  const onStreamPreviewRef = useRef(onStreamPreview)
   const [mapReady, setMapReady] = useState(false)
-
-  useEffect(() => {
-    onStreamAddToGridRef.current = onStreamAddToGrid
-    onStreamPreviewRef.current = onStreamPreview
-  }, [onStreamAddToGrid, onStreamPreview])
   
   console.log('StreamLocationMap mounted with', streams.length, 'total streams')
   if (streams.length > 0) {
     console.log('First stream:', streams[0])
   }
-
-  const getMarkerColor = useCallback((stream: StreamData, isViewing: boolean) => {
-    if (isViewing) return '#d32f2f' // active in grid
-    const live = stream.status === 'Live' || stream.isLive
-    return live ? '#4CAF50' : '#9E9E9E'
-  }, [])
   
   // Filter streams that have location data
   const streamWithLocation = useMemo(() => {
@@ -398,8 +342,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
           center: [41.85571672210071, -91.86152308331968], // Centered on specified location
           zoom: 10,
           zoomControl: true,
-          scrollWheelZoom: true,
-          boxZoom: false, // Disable shift+drag box zoom so shift+click adds to grid cleanly
+          scrollWheelZoom: true
         })
         console.log('Map instance created')
 
@@ -471,7 +414,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
         
         const marker = L.circleMarker([stream.latitude!, stream.longitude!], {
           radius: 6,
-          fillColor: getMarkerColor(stream, isViewing),
+          fillColor: isViewing ? '#4CAF50' : '#1976D2',
           color: '#ffffff',
           weight: 2,
           opacity: 0.8,
@@ -490,50 +433,15 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
         const popup = L.popup().setContent(popupContent)
         marker.bindPopup(popup)
         
-        // Track shift state as early as possible so popupopen can respect it
-        marker.on('mousedown', (ev: any) => {
-          const nativeEvt = ev?.originalEvent
-          const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
-          lastInteractionWasShiftRef.current = !!shiftPressed
+        // Highlight in list when popup opens
+        marker.on('popupopen', () => {
+          onStreamPreview(stream._id)
         })
 
-        // Highlight in list when popup opens unless the last interaction was a shift-click
-        marker.on('popupopen', (ev: any) => {
-          if (lastInteractionWasShiftRef.current) {
-            ev?.target?.closePopup?.()
-            lastInteractionWasShiftRef.current = false
-            return
-          }
-          onStreamPreviewRef.current?.(stream._id)
+        // Handle click to highlight in list
+        marker.on('click', () => {
+          onStreamPreview(stream._id)
         })
-
-        const handleMarkerActivate = (ev: any) => {
-          const nativeEvt = ev?.originalEvent
-          if (nativeEvt && (nativeEvt as any).__swHandled) {
-            return
-          }
-          if (nativeEvt) {
-            ;(nativeEvt as any).__swHandled = true
-          }
-          const shiftPressed = nativeEvt?.shiftKey || nativeEvt?.getModifierState?.('Shift')
-          lastInteractionWasShiftRef.current = !!shiftPressed
-          if (shiftPressed && onStreamAddToGridRef.current) {
-            nativeEvt?.preventDefault?.()
-            nativeEvt?.stopPropagation?.()
-            marker.closePopup?.()
-            onStreamAddToGridRef.current(stream._id)
-            // Reset flag after the shift-click interaction completes so future clicks behave normally
-            setTimeout(() => {
-              lastInteractionWasShiftRef.current = false
-            }, 0)
-            return
-          }
-          lastInteractionWasShiftRef.current = false
-          onStreamPreviewRef.current?.(stream._id)
-        }
-
-        // Handle click; boxZoom is disabled so shift+click won't trigger zoom
-        marker.on('click', handleMarkerActivate)
 
         marker.addTo(leafletMapRef.current)
         markersRef.current.set(stream._id, marker)
@@ -551,25 +459,22 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
     }
 
     updateMarkers()
-  }, [streamWithLocation, wallStreams, onStreamPreview, onStreamAddToGrid, mapReady])
+  }, [streamWithLocation, wallStreams, onStreamPreview, mapReady])
 
   // Update marker colors when wallStreams changes (without redrawing all markers)
   useEffect(() => {
     if (!markersInitializedRef.current || markersRef.current.size === 0) return
 
     const wallStreamIds = new Set(wallStreams.map(s => s._id))
-    const streamById = new Map(streams.map((s) => [s._id, s]))
     
     markersRef.current.forEach((marker, streamId) => {
       const isViewing = wallStreamIds.has(streamId)
-      const stream = streamById.get(streamId)
-      if (!stream) return
-      const newColor = getMarkerColor(stream, isViewing)
+      const newColor = isViewing ? '#4CAF50' : '#1976D2'
       marker.setStyle({ fillColor: newColor })
     })
     
-    console.log('Updated marker colors based on', wallStreams.length, 'wall streams and live status')
-  }, [wallStreams, streams, getMarkerColor])
+    console.log('Updated marker colors based on', wallStreams.length, 'wall streams')
+  }, [wallStreams])
 
   const handleHomeClick = useCallback(() => {
     if (leafletMapRef.current) {
@@ -703,7 +608,7 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
         fontSize: '11px',
         color: '#666'
       }}>
-        {streamWithLocation.length} cameras with location data • Click markers to highlight in stream list • Shift+click to add to grid
+        {streamWithLocation.length} cameras with location data • Click markers to highlight in stream list
       </div>
     </div>
   )
@@ -711,10 +616,8 @@ function StreamLocationMap({ streams, wallStreams, onStreamPreview, onStreamAddT
 
 export function ControlUI({
   connection,
-  enablePreviewScaling = true,
 }: {
   connection: StreamwallConnection
-  enablePreviewScaling?: boolean
 }) {
   const {
     isConnected,
@@ -722,56 +625,16 @@ export function ControlUI({
     openConfigFolder,
     sharedState,
     stateDoc,
-    config: primaryConfig,
+    config,
     streams,
     customStreams,
-    views: primaryViews,
-    stateIdxMap: primaryStateIdxMap,
+    views,
+    stateIdxMap,
     delayState,
     authState,
     savedLayouts,
     role,
-    grids,
-    defaultGridId,
-    overlayLabelFontSize: stateFontSize,
-    refreshSchedule: stateRefreshSchedule,
   } = connection
-  const [activeGridId, setActiveGridId] = useState<string | null>(
-    defaultGridId ?? (grids && grids[0]?.id) ?? null,
-  )
-
-  useEffect(() => {
-    if (!grids || grids.length === 0) {
-      return
-    }
-    setActiveGridId((prev) => {
-      if (prev && grids.some((g) => g.id === prev)) {
-        return prev
-      }
-      return grids[0]?.id ?? null
-    })
-  }, [grids])
-
-  const activeGrid =
-    grids?.find((g) => g.id === activeGridId) ?? grids?.[0] ?? undefined
-
-  const activeGridColor = useMemo(() => {
-    if (!grids || grids.length === 0) return undefined
-    const idx = grids.findIndex((g) => g.id === (activeGridId ?? grids[0]?.id))
-    if (idx < 0) return undefined
-    return GRID_PALETTE[idx % GRID_PALETTE.length]
-  }, [grids, activeGridId])
-
-  const shadedBackground = useMemo(() => {
-    if (!activeGridColor) return undefined
-    return Color(activeGridColor).saturate(0.55).lighten(0.25).alpha(0.22).string()
-  }, [activeGridColor])
-
-  const config = activeGrid?.config ?? primaryConfig
-  const views = activeGrid?.views ?? primaryViews
-  const stateIdxMap = activeGrid?.stateIdxMap ?? primaryStateIdxMap
-  const cellOffset = activeGrid?.cellOffset ?? 0
-
   const {
     cols,
     rows,
@@ -784,184 +647,35 @@ export function ControlUI({
     setShowDebug((prev) => !prev)
   }, [])
 
-  const isLocalControlPage = useMemo(() => {
-    const host = window.location.hostname
-    return host === 'localhost' || host === '127.0.0.1' || host === '::1'
-  }, [])
-
-  const [quitStage, setQuitStage] = useState<'hidden' | 'warn' | 'confirm'>(
-    'hidden',
-  )
-
-  const handleRequestQuit = useCallback(() => {
-    setQuitStage(isLocalControlPage ? 'confirm' : 'warn')
-  }, [isLocalControlPage])
-
-  const handleCancelQuit = useCallback(() => {
-    setQuitStage('hidden')
-  }, [])
-
-  const handleConfirmQuit = useCallback(() => {
-    send({ type: 'quit' })
-    setQuitStage('hidden')
-  }, [send])
-
-  const handleAcknowledgeRemoteQuit = useCallback(() => {
-    setQuitStage('confirm')
-  }, [])
-
   const [spotlightedStreamId, setSpotlightedStreamId] = useState<string | undefined>()
 
-  useEffect(() => {
-    if (!activeGrid) {
-      setSpotlightedStreamId(undefined)
-      return
-    }
-    // Respect the grid's authoritative spotlight value even when null, so we don't fall back to stale legacy tokens
-    let spotlightToken: string | null | undefined
-    if (Object.prototype.hasOwnProperty.call(activeGrid, 'spotlightStreamId')) {
-      spotlightToken = activeGrid.spotlightStreamId ?? null
-    } else {
-      spotlightToken =
-        sharedState?.uiState?.spotlightedByGrid?.[activeGrid.id] ??
-        sharedState?.uiState?.spotlightAssignments?.[activeGrid.id] ??
-        null
-    }
-
-    if (!spotlightToken) {
-      setSpotlightedStreamId(undefined)
-      return
-    }
-
-    const matchingStreamId = streams.find(
-      (stream) => stream._id === spotlightToken || stream.link === spotlightToken,
-    )?._id
-    setSpotlightedStreamId(matchingStreamId ?? undefined)
-  }, [activeGrid, sharedState, streams])
-
   const handleRefreshAllViews = useCallback(() => {
-    send({ type: 'refresh-all-views', gridId: activeGridId ?? undefined })
-  }, [send, activeGridId])
+    send({ type: 'refresh-all-views' })
+  }, [send])
 
   const handleRefreshErroredViews = useCallback(() => {
-    send({ type: 'refresh-errored-views', gridId: activeGridId ?? undefined })
-  }, [send, activeGridId])
+    send({ type: 'refresh-errored-views' })
+  }, [send])
 
-  const refreshSchedule = stateRefreshSchedule ?? sharedState?.refreshSchedule ?? { enabled: false, time: '02:00' }
-  const [scheduledTime, setScheduledTime] = useState(refreshSchedule.time)
-  const [scheduleEnabled, setScheduleEnabled] = useState(refreshSchedule.enabled)
-  const labelFontSize = stateFontSize ?? sharedState?.overlayLabelFontSize ?? 16
-  const [localFontSize, setLocalFontSize] = useState<number>(labelFontSize)
-
-  useEffect(() => {
-    setLocalFontSize(labelFontSize)
-  }, [labelFontSize])
-
-  useEffect(() => {
-    setScheduledTime(refreshSchedule.time)
-    setScheduleEnabled(refreshSchedule.enabled)
-  }, [refreshSchedule.enabled, refreshSchedule.time])
-
-  const handleLabelFontChange = useCallback((delta: number) => {
-    const base = Number.isFinite(localFontSize) ? localFontSize : labelFontSize
-    const next = Math.max(8, Math.min(48, Math.round(base + delta)))
-    setLocalFontSize(next)
-    send({ type: 'set-label-font-size', fontSize: next } as any)
-  }, [localFontSize, labelFontSize, send])
-
-  const handleScheduleToggle = useCallback(() => {
-    const nextEnabled = !scheduleEnabled
-    setScheduleEnabled(nextEnabled)
-    send({ type: 'set-refresh-schedule', enabled: nextEnabled, time: scheduledTime } as any)
-  }, [scheduleEnabled, scheduledTime, send])
-
-  const handleScheduleTimeChange = useCallback((e: JSX.TargetedEvent<HTMLInputElement>) => {
-    const next = (e.currentTarget.value || '02:00').slice(0, 5)
-    setScheduledTime(next)
-    send({ type: 'set-refresh-schedule', enabled: scheduleEnabled, time: next } as any)
-  }, [scheduleEnabled, send])
-
-  const loopRefreshErroredByGrid = sharedState?.uiState?.loopRefreshErroredByGrid ?? {}
-  const legacyLoopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
-  const loopRefreshTargetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id ?? null
-  const hasPerGridLoop = Object.keys(loopRefreshErroredByGrid).length > 0
-  const loopRefreshErrored = loopRefreshTargetGridId
-    ? (hasPerGridLoop ? !!loopRefreshErroredByGrid[loopRefreshTargetGridId] : legacyLoopRefreshErrored)
-    : legacyLoopRefreshErrored
+  const loopRefreshErrored = sharedState?.uiState?.loopRefreshErrored ?? false
   const toggleLoopRefreshErrored = useCallback(() => {
-    const targetGridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id
-    if (!targetGridId) {
-      return
-    }
     stateDoc.transact(() => {
       const uiStateMap = stateDoc.getMap<any>('uiState')
-      let loopMap = uiStateMap.get('loopRefreshErroredByGrid') as
-        | Y.Map<boolean>
-        | undefined
-      if (!loopMap) {
-        loopMap = new Y.Map<boolean>()
-        uiStateMap.set('loopRefreshErroredByGrid', loopMap)
-      }
-      const next = !(loopMap.get(targetGridId) ?? false)
-      loopMap.set(targetGridId, next)
-      if (uiStateMap.has('loopRefreshErrored')) {
-        uiStateMap.delete('loopRefreshErrored')
-      }
+      uiStateMap.set('loopRefreshErrored', !loopRefreshErrored)
     })
-  }, [stateDoc, activeGridId, defaultGridId, grids])
+  }, [stateDoc, loopRefreshErrored])
 
   useEffect(() => {
-    const intervals: number[] = []
-
-    const loopTargets: Array<[string, boolean]> = Object.entries(
-      loopRefreshErroredByGrid,
-    )
-
-    if (!hasPerGridLoop && legacyLoopRefreshErrored && loopRefreshTargetGridId) {
-      loopTargets.push([loopRefreshTargetGridId, true])
+    if (!loopRefreshErrored) {
+      return
     }
 
-    loopTargets.forEach(([gridId, enabled]) => {
-      if (!enabled) {
-        return
-      }
-      const interval = window.setInterval(() => {
-        send({ type: 'refresh-errored-views', gridId })
-      }, 5000)
-      intervals.push(interval)
-    })
+    const interval = setInterval(() => {
+      send({ type: 'refresh-errored-views' })
+    }, 5000) // Refresh every 5 seconds
 
-    return () => {
-      intervals.forEach(clearInterval)
-    }
-  }, [
-    loopRefreshErroredByGrid,
-    legacyLoopRefreshErrored,
-    loopRefreshTargetGridId,
-    send,
-  ])
-
-  const toGlobalIdx = useCallback(
-    (localIdx: number) => cellOffset + localIdx,
-    [cellOffset],
-  )
-
-  const getViewsMap = useCallback(
-    () => stateDoc.getMap<Y.Map<string | undefined>>('views'),
-    [stateDoc],
-  )
-
-  const getSharedStreamId = useCallback(
-    (globalIdx: number) => {
-      if (!sharedState?.views) {
-        return undefined
-      }
-      const asString = (sharedState.views as any)[String(globalIdx)]?.streamId
-      const asNumber = (sharedState.views as any)[globalIdx]?.streamId
-      return asString ?? asNumber
-    },
-    [sharedState],
-  )
+    return () => clearInterval(interval)
+  }, [loopRefreshErrored, send])
 
   const [swapStartIdx, setSwapStartIdx] = useState<number | undefined>()
   const handleSwapView = useCallback(
@@ -984,29 +698,23 @@ export function ControlUI({
         return
       }
       stateDoc.transact(() => {
-        const viewsState = getViewsMap()
+        const viewsState = stateDoc.getMap<Y.Map<string | undefined>>('views')
         const startStreamId = viewsState
-          ?.get(String(toGlobalIdx(swapStartIdx)))
+          ?.get(String(swapStartIdx))
           ?.get('streamId')
-        const toStreamId = viewsState
-          .get(String(toGlobalIdx(toIdx)))
-          ?.get('streamId')
+        const toStreamId = viewsState.get(String(toIdx))?.get('streamId')
         const startSpaces = stateIdxMap.get(swapStartIdx)?.spaces ?? []
         const toSpaces = stateIdxMap.get(toIdx)?.spaces ?? []
         for (const startSpaceIdx of startSpaces) {
-          viewsState
-            .get(String(toGlobalIdx(startSpaceIdx)))
-            ?.set('streamId', toStreamId)
+          viewsState.get(String(startSpaceIdx))?.set('streamId', toStreamId)
         }
         for (const toSpaceIdx of toSpaces) {
-          viewsState
-            .get(String(toGlobalIdx(toSpaceIdx)))
-            ?.set('streamId', startStreamId)
+          viewsState.get(String(toSpaceIdx))?.set('streamId', startStreamId)
         }
       })
       setSwapStartIdx(undefined)
     },
-    [getViewsMap, stateIdxMap, swapStartIdx, toGlobalIdx, stateDoc],
+    [stateDoc, stateIdxMap, swapStartIdx],
   )
 
   const [hoveringIdx, setHoveringIdx] = useState<number>()
@@ -1062,15 +770,11 @@ export function ControlUI({
         return
       }
       stateDoc.transact(() => {
-        const viewsState = getViewsMap()
-        const streamId = viewsState
-          .get(String(toGlobalIdx(dragStart)))
-          ?.get('streamId')
+        const viewsState = stateDoc.getMap<Y.Map<string | undefined>>('views')
+        const streamId = viewsState.get(String(dragStart))?.get('streamId')
         for (let idx = 0; idx < cols * rows; idx++) {
           if (idxInBox(cols, dragStart, hoveringIdx, idx)) {
-            viewsState
-              .get(String(toGlobalIdx(idx)))
-              ?.set('streamId', streamId)
+            viewsState.get(String(idx))?.set('streamId', streamId)
           }
         }
       })
@@ -1078,7 +782,7 @@ export function ControlUI({
     }
     window.addEventListener('mouseup', endDrag)
     return () => window.removeEventListener('mouseup', endDrag)
-  }, [stateDoc, dragStart, hoveringIdx, getViewsMap, toGlobalIdx, cols, rows])
+  }, [stateDoc, dragStart, hoveringIdx])
 
   const [focusedInputIdx, setFocusedInputIdx] = useState<number | undefined>()
   const handleBlurInput = useCallback(() => setFocusedInputIdx(undefined), [])
@@ -1086,17 +790,13 @@ export function ControlUI({
   const handleSetView = useCallback(
     (idx: number, streamId: string) => {
       // Allow spot placeholders (spot-1, spot-2, etc.) or any custom streamId
-      // Ensure the view entry exists before setting, so multi-grid writes succeed
-      const viewsMap = stateDoc.getMap<Y.Map<string | undefined>>('views')
-      const globalIdx = toGlobalIdx(idx)
-      let viewEntry = viewsMap.get(String(globalIdx))
-      if (!viewEntry) {
-        viewEntry = new Y.Map<string | undefined>()
-        viewsMap.set(String(globalIdx), viewEntry)
-      }
-      viewEntry.set('streamId', streamId)
+      // Even if they're not in the streams array, we still add them to the grid
+      stateDoc
+        .getMap<Y.Map<string | undefined>>('views')
+        .get(String(idx))
+        ?.set('streamId', streamId)
     },
-    [stateDoc, toGlobalIdx],
+    [stateDoc],
   )
 
   const handleSetListening = useCallback(
@@ -1104,10 +804,9 @@ export function ControlUI({
       send({
         type: 'set-listening-view',
         viewIdx: listening ? idx : null,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleSetBackgroundListening = useCallback(
@@ -1116,10 +815,9 @@ export function ControlUI({
         type: 'set-view-background-listening',
         viewIdx,
         listening,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleSetBlurred = useCallback(
@@ -1128,10 +826,9 @@ export function ControlUI({
         type: 'set-view-blurred',
         viewIdx,
         blurred,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleReloadView = useCallback(
@@ -1139,10 +836,9 @@ export function ControlUI({
       send({
         type: 'reload-view',
         viewIdx,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleRotateStream = useCallback(
@@ -1199,10 +895,9 @@ export function ControlUI({
       send({
         type: 'spotlight',
         url: stream.link,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [streams, send, activeGridId],
+    [streams, send],
   )
 
   const handleSaveLayout = useCallback(
@@ -1211,10 +906,9 @@ export function ControlUI({
         type: 'save-layout',
         slot,
         name,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleLoadLayout = useCallback(
@@ -1222,10 +916,9 @@ export function ControlUI({
       send({
         type: 'load-layout',
         slot,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
 
   const handleClearLayout = useCallback(
@@ -1233,129 +926,37 @@ export function ControlUI({
       send({
         type: 'clear-layout',
         slot,
-        gridId: activeGridId ?? undefined,
       })
     },
-    [send, activeGridId],
+    [send],
   )
-
-  const handleExportAllLayouts = useCallback(() => {
-    // Cast to any to allow sending commands not yet in ControlCommand union
-    send({ type: 'export-layouts', gridId: activeGridId ?? undefined } as any)
-  }, [send, activeGridId])
-
-  const handleImportLayouts = useCallback(() => {
-    send({ type: 'import-layouts', gridId: activeGridId ?? undefined } as any)
-  }, [send, activeGridId])
-
-  const handleExportLayoutSlot = useCallback(
-    (slot: number) => {
-      send({ type: 'export-layout-slot', slot, gridId: activeGridId ?? undefined } as any)
-    },
-    [send, activeGridId],
-  )
-
-  const handleExportStreamsToml = useCallback(() => {
-    send({ type: 'export-streams-toml' })
-  }, [send])
-
-  const handleImportStreamsToml = useCallback(() => {
-    send({ type: 'import-streams-toml' })
-  }, [send])
-
-  // Map grid id -> layout metadata so we can target the selected grid when adding streams from the map/list
-  const gridMetaById = useMemo(() => {
-    if (!grids || grids.length === 0) return new Map<string, { cols: number; rows: number; cellOffset: number }>()
-    return new Map(
-      grids.map((g) => [g.id, { cols: g.config.cols, rows: g.config.rows, cellOffset: g.cellOffset }]),
-    )
-  }, [grids])
 
   const handleClickId = useCallback(
     (streamId: string) => {
-      console.log('handleClickId start', {
-        activeGridId,
-        defaultGridId,
-        gridMetaKeys: Array.from(gridMetaById.keys()),
-        gridsCount: grids?.length ?? 0,
-      })
-
-      // Pick the currently selected grid (or first available) to target
-      const targetMeta =
-        (activeGridId && gridMetaById.get(activeGridId)) ||
-        gridMetaById.values().next().value ||
-        (cols != null && rows != null ? { cols, rows, cellOffset } : null)
-
-      const targetGridId =
-        (activeGridId && gridMetaById.has(activeGridId) && activeGridId) ||
-        (gridMetaById.size > 0 ? Array.from(gridMetaById.keys())[0] : null)
-
-      if (!targetMeta || sharedState == null) {
-        console.log('handleClickId aborted', {
-          hasTargetMeta: !!targetMeta,
-          hasSharedState: sharedState != null,
-          activeGridId,
-          gridMetaKeys: Array.from(gridMetaById.keys()),
-        })
+      if (cols == null || rows == null || sharedState == null) {
         return
       }
 
-      const { cols: targetCols, rows: targetRows, cellOffset: targetOffset } = targetMeta
-      const toGlobal = (idx: number) => targetOffset + idx
-
-      if (navigator?.clipboard?.writeText) {
-        navigator.clipboard.writeText(streamId).catch((err) => {
-          console.warn('Unable to copy stream id to clipboard:', err)
-        })
-      } else {
-        console.warn('Clipboard API not available; skipping copy')
-      }
-
-      const setStreamAt = (idx: number) => {
-        const viewsMap = stateDoc.getMap<Y.Map<string | undefined>>('views')
-        const globalIdx = toGlobal(idx)
-        let viewEntry = viewsMap.get(String(globalIdx))
-        if (!viewEntry) {
-          viewEntry = new Y.Map<string | undefined>()
-          viewsMap.set(String(globalIdx), viewEntry)
-        }
-        viewEntry.set('streamId', streamId)
+      try {
+        navigator.clipboard.writeText(streamId)
+      } catch (err) {
+        console.warn('Unable to copy stream id to clipboard:', err)
       }
 
       if (focusedInputIdx !== undefined) {
-        console.log('handleClickId placing via focused input', {
-          targetGridId,
-          focusedInputIdx,
-          globalIdx: toGlobal(focusedInputIdx),
-        })
-        setStreamAt(focusedInputIdx)
+        handleSetView(focusedInputIdx, streamId)
         return
       }
 
-      const viewsMap = getViewsMap()
-      const availableIdx = range(targetCols * targetRows).find((i) => {
-        const globalIdx = toGlobal(i)
-        const viewEntry = viewsMap.get(String(globalIdx))
-        const streamIdAtIdx = viewEntry?.get('streamId') ?? getSharedStreamId(globalIdx)
-        return !streamIdAtIdx
-      })
+      const availableIdx = range(cols * rows).find(
+        (i) => !sharedState.views[i].streamId,
+      )
       if (availableIdx === undefined) {
-        console.log('handleClickId no empty slot', {
-          targetGridId,
-          targetCols,
-          targetRows,
-          targetOffset,
-        })
         return
       }
-      console.log('handleClickId placing via first empty slot', {
-        targetGridId,
-        availableIdx,
-        globalIdx: toGlobal(availableIdx),
-      })
-      setStreamAt(availableIdx)
+      handleSetView(availableIdx, streamId)
     },
-    [activeGridId, defaultGridId, gridMetaById, grids, cols, rows, cellOffset, sharedState, focusedInputIdx, getSharedStreamId, getViewsMap, stateDoc],
+    [cols, rows, sharedState, focusedInputIdx],
   )
 
   const handleSwapWithSpot = useCallback(
@@ -1364,13 +965,13 @@ export function ControlUI({
         return
       }
 
-      const viewsMap = getViewsMap()
+      const viewsMap = stateDoc.getMap<Y.Map<string | undefined>>('views')
       const spotId = `spot-${spotNum}`
       
       // Find ALL spot placeholder positions
       const spotIndices: number[] = []
       for (let i = 0; i < cols * rows; i++) {
-        const viewData = viewsMap.get(String(toGlobalIdx(i)))
+        const viewData = viewsMap.get(String(i))
         if (viewData?.get('streamId') === spotId) {
           spotIndices.push(i)
         }
@@ -1383,14 +984,14 @@ export function ControlUI({
       // Replace all spots with the stream ID - that's it, no automatic replacement
       stateDoc.transact(() => {
         spotIndices.forEach((spotIdx) => {
-          const spotView = viewsMap.get(String(toGlobalIdx(spotIdx)))
+          const spotView = viewsMap.get(String(spotIdx))
           if (spotView) {
             spotView.set('streamId', streamIdToSwap)
           }
         })
       })
     },
-    [cols, rows, getViewsMap, toGlobalIdx],
+    [cols, rows],
   )
 
   const handleChangeCustomStream = useCallback(
@@ -1604,7 +1205,7 @@ export function ControlUI({
   )
 
   return (
-    <Stack flex="1" direction="row" gap={16} style={{ minHeight: '100vh', alignItems: 'stretch' }}>
+    <Stack flex="1" direction="row" gap={16}>
       <Stack className="grid-container">
         <StyledHeader>
           {role !== 'local' && (
@@ -1616,159 +1217,6 @@ export function ControlUI({
               <div>role: {role}</div>
             </>
           )}
-          {roleCan(role, 'quit') && (
-            <div
-              style={{
-                marginLeft: 'auto',
-                marginRight: 0,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '8px',
-              }}
-            >
-              {quitStage === 'warn' ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '10px',
-                    padding: '8px 12px',
-                    background: '#fff8e1',
-                    border: '1px solid #f6c343',
-                    borderRadius: '12px',
-                    boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
-                    color: '#8a6d1d',
-                    maxWidth: '420px',
-                  }}
-                >
-                  <div style={{ flex: 1, fontSize: '12px', lineHeight: 1.35 }}>
-                    <strong>Are you sure?</strong> You will need to relaunch this on the machine itself; this page will no longer work.
-                  </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
-                    <button
-                      onClick={handleAcknowledgeRemoteQuit}
-                      style={{
-                        background: '#f6c343',
-                        color: '#3f2e00',
-                        border: 'none',
-                        borderRadius: '10px',
-                        padding: '6px 10px',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                      }}
-                      title="Proceed to quit"
-                    >
-                      Continue
-                    </button>
-                    <button
-                      onClick={handleCancelQuit}
-                      style={{
-                        background: '#fff',
-                        color: '#1f2937',
-                        border: '1px solid #d1d5db',
-                        borderRadius: '10px',
-                        padding: '6px 10px',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                      }}
-                      title="Cancel quit"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : quitStage === 'confirm' ? (
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px',
-                    padding: '6px 10px',
-                    background: '#ffe3e3',
-                    border: '1px solid #f25f5c',
-                    borderRadius: '999px',
-                    boxShadow: '0 2px 6px rgba(0,0,0,0.12)',
-                    marginRight: 0,
-                  }}
-                >
-                  <span
-                    style={{
-                      color: '#b00020',
-                      fontWeight: 700,
-                      marginRight: 0,
-                    }}
-                  >
-                    Quit?
-                  </span>
-                  <button
-                    onClick={handleConfirmQuit}
-                    style={{
-                      background: '#d90429',
-                      color: '#fff',
-                      border: 'none',
-                      borderRadius: '999px',
-                      padding: '6px 12px',
-                      fontWeight: 700,
-                      cursor: 'pointer',
-                      marginRight: 0,
-                      boxShadow: '0 2px 8px rgba(217,4,41,0.25)',
-                    }}
-                    title="Quit Streamwall now"
-                  >
-                    Quit now
-                  </button>
-                  <button
-                    onClick={handleCancelQuit}
-                    style={{
-                      background: '#fff',
-                      color: '#1f2937',
-                      border: '1px solid #d1d5db',
-                      borderRadius: '999px',
-                      padding: '6px 10px',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      marginRight: 0,
-                    }}
-                    title="Cancel quit"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={handleRequestQuit}
-                  style={{
-                    marginLeft: 'auto',
-                    marginRight: 0,
-                    background: '#d90429',
-                    color: '#fff',
-                    border: 'none',
-                    borderRadius: '999px',
-                    width: '36px',
-                    height: '36px',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    boxShadow: '0 4px 10px rgba(0,0,0,0.2)',
-                    cursor: 'pointer',
-                    transition: 'transform 120ms ease, box-shadow 120ms ease',
-                    fontSize: '16px',
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.transform = 'scale(1.05)'
-                    e.currentTarget.style.boxShadow = '0 6px 14px rgba(0,0,0,0.25)'
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.transform = 'scale(1.0)'
-                    e.currentTarget.style.boxShadow = '0 4px 10px rgba(0,0,0,0.2)'
-                  }}
-                  title="Quit Streamwall"
-                >
-                  <FaTimes />
-                </button>
-              )}
-            </div>
-          )}
         </StyledHeader>
         {delayState && (
           <StreamDelayBox
@@ -1778,85 +1226,19 @@ export function ControlUI({
             setStreamRunning={setStreamRunning}
           />
         )}
-        {grids && grids.length > 1 && (
-          <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-            {grids.map((grid, idx) => {
-              const paletteColor = GRID_PALETTE[idx % GRID_PALETTE.length]
-              const isActive = activeGridId === grid.id
-              const buttonBg = isActive
-                ? Color(paletteColor).lighten(0.15).desaturate(0.05).hex()
-                : Color(paletteColor).lighten(0.45).desaturate(0.2).hex()
-              const borderColor = Color(paletteColor).darken(isActive ? 0.15 : 0.05).hex()
-
-              return (
-                <button
-                  key={grid.id}
-                  onClick={() => setActiveGridId(grid.id)}
-                  style={{
-                    padding: '6px 10px',
-                    borderRadius: '6px',
-                    border: `${isActive ? 2 : 1}px solid ${borderColor}`,
-                    background: buttonBg,
-                    color: '#0f172a',
-                    fontWeight: isActive ? 700 : 500,
-                    cursor: 'pointer',
-                    minWidth: '110px',
-                    boxShadow: isActive
-                      ? `0 0 0 3px ${Color(paletteColor).alpha(0.12).string()}`
-                      : 'none',
-                    transition: 'background 120ms ease, box-shadow 120ms ease, border-color 120ms ease',
-                  }}
-                >
-                  {grid.id.replace('grid-', 'Grid ')} ({grid.config.cols}x{grid.config.rows})
-                </button>
-              )
-            })}
-          </div>
-        )}
-        <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
+        <StyledDataContainer isConnected={isConnected}>
           {cols != null && rows != null && (
-            (() => {
-              const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1400
-              const maxPreviewWidth = Math.max(480, Math.min(1400, viewportWidth - 48))
-              const safeWidth = Math.max(windowWidth, 1)
-              const scale = enablePreviewScaling
-                ? Math.min(1, maxPreviewWidth / safeWidth)
-                : 1
-              const previewWidth = safeWidth * scale
-              const previewHeight = windowHeight * scale
-              const gridScale = enablePreviewScaling ? scale : 1
-              return (
-                <div
-                  style={{
-                    width: `${previewWidth}px`,
-                    height: `${previewHeight}px`,
-                    margin: '0 auto 12px',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <div
-                    style={{
-                      position: 'relative',
-                      width: `${previewWidth}px`,
-                      height: `${previewHeight}px`,
-                      background: '#0c111a',
-                      borderRadius: '12px',
-                      overflow: 'hidden',
-                      boxShadow: '0 6px 24px rgba(0,0,0,0.35)',
-                    }}
-                  >
-                    <StyledGridContainer
-                      className="grid"
-                      onMouseMove={updateHoveringIdx}
-                      windowWidth={windowWidth}
-                      windowHeight={windowHeight}
-                      $scale={gridScale}
-                    >
+            <StyledGridContainer
+              className="grid"
+              onMouseMove={updateHoveringIdx}
+              windowWidth={windowWidth}
+              windowHeight={windowHeight}
+            >
               <StyledGridInputs>
                 {range(0, rows).map((y) =>
                   range(0, cols).map((x) => {
                     const idx = cols * y + x
-                    const streamId = getSharedStreamId(toGlobalIdx(idx))
+                    const { streamId } = sharedState?.views?.[idx] ?? {}
                     const isDragHighlighted =
                       dragStart != null &&
                       hoveringIdx != null &&
@@ -1877,7 +1259,6 @@ export function ControlUI({
                         onMouseDown={handleDragStart}
                         onFocus={setFocusedInputIdx}
                         onBlur={handleBlurInput}
-                        scale={gridScale}
                       />
                     )
                   }),
@@ -1891,8 +1272,7 @@ export function ControlUI({
                   }
 
                   const gridIdx = pos.spaces[0]
-                  const globalIdx = toGlobalIdx(gridIdx)
-                  const { streamId } = sharedState?.views[globalIdx] ?? {}
+                  const { streamId } = sharedState?.views[gridIdx] ?? {}
                   // Allow spots (spot-1, spot-2, etc.) to be displayed even without stream data
                   // Regular streams must have actual data
                   if (streamId == null) {
@@ -1906,7 +1286,7 @@ export function ControlUI({
 
                   return (
                     <StyledGridPreviewBox
-                      key={`preview-${globalIdx}`}
+                      key={`preview-${gridIdx}`}
                       color={idColor(streamId)}
                       isSpot={isSpot}
                       pos={pos}
@@ -1924,7 +1304,7 @@ export function ControlUI({
                       }}
                     >
                       <StyledGridInfo>
-                        <StyledGridLabel $scale={gridScale}>
+                        <StyledGridLabel>
                           {isSpot ? streamId.toUpperCase() : streamId}
                         </StyledGridLabel>
                         {!isSpot && <div>{data?.source}</div>}
@@ -1938,8 +1318,7 @@ export function ControlUI({
                 let hasSpots = false
                 if (sharedState) {
                   for (let i = 0; i < (cols ?? 0) * (rows ?? 0); i++) {
-                    const streamIdAtIdx = getSharedStreamId(toGlobalIdx(i))
-                    if (streamIdAtIdx?.startsWith?.('spot-')) {
+                    if (sharedState.views[i]?.streamId?.startsWith('spot-')) {
                       hasSpots = true
                       break
                     }
@@ -1953,9 +1332,7 @@ export function ControlUI({
                         if (!pos) {
                           return null
                         }
-                        const streamId = getSharedStreamId(
-                          toGlobalIdx(pos.spaces[0]),
-                        )
+                        const { streamId } = sharedState?.views[pos.spaces[0]] ?? {}
                         if (!streamId) {
                           return null
                         }
@@ -1969,7 +1346,6 @@ export function ControlUI({
                               width: `${(100 * pos.width) / windowWidth}%`,
                               height: `${(100 * pos.height) / windowHeight}%`,
                             }}
-                            scale={gridScale}
                             isDisplaying={matchesState('displaying', state.state)}
                             isListening={isListening}
                             isBackgroundListening={isBackgroundListening}
@@ -2002,11 +1378,7 @@ export function ControlUI({
                   </>
                 )
               })()}
-                    </StyledGridContainer>
-                  </div>
-                </div>
-              )
-            })()
+            </StyledGridContainer>
           )}
           {/* Two-column section: Debug/Custom Streams on left, Map on right */}
           <div style={{ display: 'flex', gap: '16px', marginBottom: '16px', paddingTop: '16px' }}>
@@ -2094,19 +1466,18 @@ export function ControlUI({
                     <button 
                       onClick={openConfigFolder}
                       style={{ 
-                        padding: '4px',
+                        padding: '6px 12px',
                         backgroundColor: '#4CAF50',
                         color: 'white',
                         border: 'none',
-                        borderRadius: '50%',
+                        borderRadius: '4px',
                         cursor: 'pointer',
-                        fontSize: '16px',
+                        fontWeight: 'bold',
+                        fontSize: '12px',
                         transition: 'all 0.2s',
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'center',
-                        width: '28px',
-                        height: '28px'
+                        gap: '6px'
                       }}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.backgroundColor = '#45a049'
@@ -2116,7 +1487,7 @@ export function ControlUI({
                       }}
                       title="Open config folder"
                     >
-                      <FaCog />
+                      <FaFolder /> Config Folder
                     </button>
                   )}
                   <button 
@@ -2145,46 +1516,6 @@ export function ControlUI({
                 </div>
               )}
               
-              {roleCan(role, 'refresh-all-views') && (
-                <div style={{ marginTop: '8px', display: 'flex', gap: '16px', alignItems: 'center', flexWrap: 'wrap' }}>
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px' }}>
-                      <input
-                        type="checkbox"
-                        checked={scheduleEnabled}
-                        onChange={handleScheduleToggle}
-                        style={{ margin: 0 }}
-                      />
-                      Auto refresh all at
-                    </label>
-                    <input
-                      type="time"
-                      value={scheduledTime}
-                      onChange={handleScheduleTimeChange}
-                      style={{ padding: '4px 6px', borderRadius: '4px', border: '1px solid #ccc', fontSize: '12px' }}
-                    />
-                  </div>
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <span style={{ fontSize: '12px', color: '#333' }}>Label size</span>
-                    <button
-                      onClick={() => handleLabelFontChange(-2)}
-                      style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
-                      title="Decrease label font size"
-                    >
-                      -
-                    </button>
-                    <span style={{ fontSize: '12px', minWidth: '32px', textAlign: 'center' }}>{labelFontSize}px</span>
-                    <button
-                      onClick={() => handleLabelFontChange(2)}
-                      style={{ padding: '4px 8px', borderRadius: '4px', border: '1px solid #ccc', background: '#f5f5f5', cursor: 'pointer' }}
-                      title="Increase label font size"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
-              )}
-
               {/* Quick Spot Buttons */}
               <div style={{ marginTop: '16px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
                 <span style={{ fontWeight: 'bold', fontSize: '12px', marginRight: '8px' }}>Placeholders:</span>
@@ -2223,22 +1554,6 @@ export function ControlUI({
                 roleCan(role, 'delete-custom-stream') && (
                   <>
                     <h2>Custom Streams</h2>
-                    <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', flexWrap: 'wrap' }}>
-                      <button
-                        onClick={handleExportStreamsToml}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
-                        title="Export the current streams.toml file"
-                      >
-                        <FaDownload /> Export streams.toml
-                      </button>
-                      <button
-                        onClick={handleImportStreamsToml}
-                        style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
-                        title="Import and replace streams.toml"
-                      >
-                        <FaUpload /> Import streams.toml
-                      </button>
-                    </div>
                     <div>
                       {customStreams.map(({ link, label, kind }, idx) => (
                         <CustomStreamInput
@@ -2264,7 +1579,6 @@ export function ControlUI({
                 streams={streams}
                 wallStreams={wallStreams}
                 onStreamPreview={handleStreamPreview}
-                onStreamAddToGrid={handleClickId}
               />
             </div>
           </div>
@@ -2284,9 +1598,6 @@ export function ControlUI({
                   onSave={handleSaveLayout}
                   onLoad={handleLoadLayout}
                   onClear={handleClearLayout}
-                  onExportSlot={handleExportLayoutSlot}
-                  onExportAll={handleExportAllLayouts}
-                  onImport={handleImportLayouts}
                   rowsToShow={layoutCollapsed ? 2 : 11}
                 />
               </div>
@@ -2346,8 +1657,8 @@ export function ControlUI({
           <Facts />
         </StyledDataContainer>
       </Stack>
-      <Stack className="stream-list" flex="1" scroll={true} minHeight={200} style={{ maxHeight: '100vh' }}>
-        <StyledDataContainer isConnected={isConnected} bgColor={shadedBackground}>
+      <Stack className="stream-list" flex="1" scroll={true} minHeight={200}>
+        <StyledDataContainer isConnected={isConnected}>
           {isConnected ? (
             <div>
               <input
@@ -2719,7 +2030,6 @@ function GridInput({
   onMouseDown,
   onFocus,
   onBlur,
-  scale,
 }: {
   style: JSX.HTMLAttributes['style']
   onMouseDown: JSX.MouseEventHandler<HTMLInputElement>
@@ -2730,7 +2040,6 @@ function GridInput({
   role: StreamwallRole | null
   onFocus: (idx: number) => void
   onBlur: (idx: number) => void
-  scale?: number
 }) {
   const handleFocus = useCallback(() => {
     onFocus(idx)
@@ -2756,7 +2065,6 @@ function GridInput({
         onMouseDown={onMouseDown}
         onChange={handleChange}
         isEager
-        $scale={scale}
       />
     </StyledGridInputContainer>
   )
@@ -2766,7 +2074,6 @@ function GridControls({
   idx,
   streamId,
   style,
-  scale,
   isDisplaying,
   isListening,
   isBackgroundListening,
@@ -2793,7 +2100,6 @@ function GridControls({
   idx: number
   streamId: string
   style: JSX.HTMLAttributes['style']
-  scale?: number
   isDisplaying: boolean
   isListening: boolean
   isBackgroundListening: boolean
@@ -2865,7 +2171,6 @@ function GridControls({
     () => onDevTools(idx),
     [idx, onDevTools],
   )
-  const controlScale = Math.min(1, Math.max(0.7, scale ?? 1))
   return (
     <StyledGridControlsContainer style={style} onMouseDown={onMouseDown}>
       {isDisplaying && (
@@ -2873,17 +2178,17 @@ function GridControls({
           {showDebug ? (
             <>
               {roleCan(role, 'reload-view') && (
-                <StyledSmallButton onClick={handleReloadClick} tabIndex={1} $scale={controlScale}>
+                <StyledSmallButton onClick={handleReloadClick} tabIndex={1}>
                   <FaSyncAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'browse') && (
-                <StyledSmallButton onClick={handleBrowseClick} tabIndex={1} $scale={controlScale}>
+                <StyledSmallButton onClick={handleBrowseClick} tabIndex={1}>
                   <FaRegWindowMaximize />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'dev-tools') && (
-                <StyledSmallButton onClick={handleDevToolsClick} tabIndex={1} $scale={controlScale}>
+                <StyledSmallButton onClick={handleDevToolsClick} tabIndex={1}>
                   <FaRegLifeRing />
                 </StyledSmallButton>
               )}
@@ -2891,7 +2196,7 @@ function GridControls({
           ) : (
             <>
               {roleCan(role, 'reload-view') && (
-                <StyledSmallButton onClick={handleReloadClick} tabIndex={1} $scale={controlScale}>
+                <StyledSmallButton onClick={handleReloadClick} tabIndex={1}>
                   <FaSyncAlt />
                 </StyledSmallButton>
               )}
@@ -2900,18 +2205,17 @@ function GridControls({
                   isActive={isSwapping}
                   onClick={handleSwapClick}
                   tabIndex={1}
-                  $scale={controlScale}
                 >
                   <FaExchangeAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'rotate-stream') && (
-                <StyledSmallButton onClick={handleRotateClick} tabIndex={1} $scale={controlScale}>
+                <StyledSmallButton onClick={handleRotateClick} tabIndex={1}>
                   <FaRedoAlt />
                 </StyledSmallButton>
               )}
               {roleCan(role, 'mutate-state-doc') && (
-                <StyledSmallButton onClick={handleClearClick} tabIndex={1} title="Clear stream" $scale={controlScale}>
+                <StyledSmallButton onClick={handleClearClick} tabIndex={1} title="Clear stream">
                   <FaTimes />
                 </StyledSmallButton>
               )}
@@ -2927,7 +2231,6 @@ function GridControls({
             title="Spotlight stream (click to close)"
             isActive={spotlightedStreamId === streamId}
             activeColor="red"
-            $scale={controlScale}
           >
             <FaSearch />
           </StyledButton>
@@ -2937,7 +2240,6 @@ function GridControls({
             isActive={isBlurred}
             onClick={handleBlurClick}
             tabIndex={1}
-            $scale={controlScale}
           >
             <FaVideoSlash />
           </StyledButton>
@@ -2950,7 +2252,6 @@ function GridControls({
             }
             onClick={handleListeningClick}
             tabIndex={1}
-            $scale={controlScale}
           >
             <FaVolumeUp />
           </StyledButton>
@@ -3010,9 +2311,6 @@ function FixedLayoutGrid({
   onSave,
   onLoad,
   onClear,
-  onExportSlot,
-  onExportAll,
-  onImport,
   rowsToShow = 11,
 }: {
   savedLayouts?: Record<string, { 
@@ -3024,49 +2322,29 @@ function FixedLayoutGrid({
   onSave: (slot: number, name: string) => void
   onLoad: (slot: number) => void
   onClear: (slot: number) => void
-  onExportSlot: (slot: number) => void
-  onExportAll: () => void
-  onImport: () => void
   rowsToShow?: number
 }) {
   // Fixed 4x11 grid (44 total slots), show specified number of rows
   const GRID_COLS = 4
+  const GRID_ROWS = 11
+  const totalSlots = GRID_COLS * GRID_ROWS
   const slotsToDisplay = GRID_COLS * rowsToShow
-
+  
   const slotsToShow = Array.from({ length: slotsToDisplay }, (_, i) => i + 1)
-
+  
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-start' }}>
-        <button
-          onClick={onExportAll}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
-          title="Export all layouts"
-        >
-          <FaDownload /> Export all
-        </button>
-        <button
-          onClick={onImport}
-          style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '6px 10px' }}
-          title="Import layouts from file"
-        >
-          <FaUpload /> Import
-        </button>
-      </div>
-      <StyledLayoutPresetGrid>
-        {slotsToShow.map((slotNum) => (
-          <LayoutPresetCard
-            key={slotNum}
-            slot={slotNum}
-            savedLayout={savedLayouts?.[`slot${slotNum}`]}
-            onSave={onSave}
-            onLoad={onLoad}
-            onClear={onClear}
-            onExport={() => onExportSlot(slotNum)}
-          />
-        ))}
-      </StyledLayoutPresetGrid>
-    </div>
+    <StyledLayoutPresetGrid>
+      {slotsToShow.map(slotNum => (
+        <LayoutPresetCard
+          key={slotNum}
+          slot={slotNum}
+          savedLayout={savedLayouts?.[`slot${slotNum}`]}
+          onSave={onSave}
+          onLoad={onLoad}
+          onClear={onClear}
+        />
+      ))}
+    </StyledLayoutPresetGrid>
   )
 }
 
@@ -3076,7 +2354,6 @@ function LayoutPresetCard({
   onSave,
   onLoad,
   onClear,
-  onExport,
 }: {
   slot: number
   savedLayout?: { 
@@ -3088,7 +2365,6 @@ function LayoutPresetCard({
   onSave: (slot: number, name: string) => void
   onLoad: (slot: number) => void
   onClear: (slot: number) => void
-  onExport: () => void
 }) {
   const [isEditing, setIsEditing] = useState(false)
   const [name, setName] = useState('')
@@ -3122,10 +2398,6 @@ function LayoutPresetCard({
       onClear(slot)
     }
   }, [savedLayout, slot, onClear])
-
-  const handleExportClick = useCallback(() => {
-    onExport()
-  }, [onExport])
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -3212,14 +2484,6 @@ function LayoutPresetCard({
           </StyledLayoutCardButton>
           {savedLayout && (
             <StyledLayoutCardButton
-              onClick={handleExportClick}
-              title={`Export ${savedLayout.name}`}
-            >
-              ⬇️
-            </StyledLayoutCardButton>
-          )}
-          {savedLayout && (
-            <StyledLayoutCardButton
               className="delete"
               onClick={handleDeleteClick}
               title={`Delete ${savedLayout.name}`}
@@ -3234,31 +2498,11 @@ function LayoutPresetCard({
             <>
               <div>{DateTime.fromMillis(savedLayout.timestamp).toFormat('M/d/yy')}</div>
               <div>{DateTime.fromMillis(savedLayout.timestamp).toFormat('HH:mm')}</div>
-              {(savedLayout.gridId || savedLayout.gridSize) && (
-                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                  {savedLayout.gridId && (
-                    <span style={{
-                      padding: '2px 6px',
-                      borderRadius: '10px',
-                      background: '#eef2ff',
-                      border: '1px solid #d0d7ff',
-                      fontSize: '11px',
-                    }}>
-                      {savedLayout.gridId.replace('grid-', 'Grid ')}
-                    </span>
-                  )}
-                  {savedLayout.gridSize && (
-                    <span style={{
-                      padding: '2px 6px',
-                      borderRadius: '10px',
-                      background: '#f5f5f5',
-                      border: '1px solid #ddd',
-                      fontSize: '11px',
-                    }}>
-                      {savedLayout.gridSize.cols}×{savedLayout.gridSize.rows}
-                    </span>
-                  )}
-                </div>
+              {savedLayout.gridSize && (
+                <div>{savedLayout.gridSize.cols}×{savedLayout.gridSize.rows}</div>
+              )}
+              {savedLayout.gridId && (
+                <div>{savedLayout.gridId}</div>
               )}
             </>
           )}
@@ -3453,7 +2697,7 @@ const StyledHeader = styled.header`
     margin-bottom: 0;
   }
 
-  > * {
+  * {
     margin-right: 2rem;
   }
 `
@@ -3496,12 +2740,8 @@ const StyledStreamDelayBox = styled.div`
   }
 `
 
-const StyledDataContainer = styled.div<{ isConnected: boolean; bgColor?: string }>`
+const StyledDataContainer = styled.div`
   opacity: ${({ isConnected }) => (isConnected ? 1 : 0.5)};
-  background: ${({ bgColor }) => bgColor ?? 'transparent'};
-  transition: background 160ms ease;
-  border-radius: 10px;
-  padding: 8px;
 `
 
 const StyledLayoutSlot = styled.div`
@@ -3640,7 +2880,7 @@ const StyledLayoutCardInfo = styled.div`
   line-height: 1.2;
 `
 
-const StyledButton = styled.button<{ isActive?: boolean; activeColor?: string; $scale?: number }>`
+const StyledButton = styled.button`
   display: flex;
   align-items: center;
   border: 2px solid gray;
@@ -3648,19 +2888,6 @@ const StyledButton = styled.button<{ isActive?: boolean; activeColor?: string; $
   background: #ccc;
   border-radius: 5px;
   cursor: pointer;
-  ${({ $scale = 1 }) => {
-    const s = Math.min(1, Math.max(0.7, $scale))
-    const pad = Math.round(6 * s)
-    const bw = Math.max(1, Math.round(2 * s))
-    const radius = Math.max(3, Math.round(5 * s))
-    const iconSize = Math.max(10, Math.round(20 * s))
-    return `
-      padding: ${pad}px;
-      border-width: ${bw}px;
-      border-radius: ${radius}px;
-      svg { width: ${iconSize}px; height: ${iconSize}px; }
-    `
-  }}
 
   ${({ isActive, activeColor = 'red' }) =>
     isActive &&
@@ -3689,13 +2916,10 @@ const StyledButton = styled.button<{ isActive?: boolean; activeColor?: string; $
 `
 
 const StyledSmallButton = styled(StyledButton)`
-  ${({ $scale = 1 }) => {
-    const s = Math.min(1, Math.max(0.7, $scale))
-    const iconSize = Math.max(8, Math.round(14 * s))
-    return `
-      svg { width: ${iconSize}px; height: ${iconSize}px; }
-    `
-  }}
+  svg {
+    width: 14px;
+    height: 14px;
+  }
 `
 
 const StyledGridPreview = styled.div`
@@ -3742,9 +2966,8 @@ const StyledGridInfo = styled.div`
   text-align: center;
 `
 
-const StyledGridLabel = styled.div<{ $scale?: number }>`
-  font-size: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
-  line-height: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
+const StyledGridLabel = styled.div`
+  font-size: 30px;
   color: #333;
 `
 
@@ -3777,7 +3000,7 @@ const StyledGridButtons = styled.div`
   }
 `
 
-const StyledGridInput = styled(LazyChangeInput)<{ $scale?: number; color: string; isHighlighted: boolean }>`
+const StyledGridInput = styled(LazyChangeInput)`
   width: 100%;
   height: 100%;
   outline: 1px solid black;
@@ -3787,8 +3010,7 @@ const StyledGridInput = styled(LazyChangeInput)<{ $scale?: number; color: string
     isHighlighted
       ? Color(color).lightness(90).hsl().string()
       : Color(color).lightness(75).hsl().string()};
-  font-size: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
-  line-height: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
+  font-size: 20px;
   text-align: center;
 
   &:focus {
@@ -3807,14 +3029,12 @@ const StyledGridControlsContainer = styled.div`
   }
 `
 
-const StyledGridContainer = styled.div<{
-  windowWidth: number
-  windowHeight: number
-  $scale?: number
-}>`
+const StyledGridContainer = styled.div.attrs(() => ({
+  scale: 0.75,
+}))`
   position: relative;
-  width: ${({ windowWidth, $scale = 1 }) => windowWidth * $scale}px;
-  height: ${({ windowHeight, $scale = 1 }) => windowHeight * $scale}px;
+  width: ${({ windowWidth, scale }) => windowWidth * scale}px;
+  height: ${({ windowHeight, scale }) => windowHeight * scale}px;
   border: 2px solid black;
   background: black;
 
