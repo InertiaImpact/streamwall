@@ -173,6 +173,7 @@ export type ControlCommand =
   | { type: 'reload-view'; viewIdx: number; gridId?: string }
   | { type: 'browse'; url: string }
   | { type: 'dev-tools'; viewIdx: number; gridId?: string }
+  | { type: 'get-debug-logs'; gridId?: string }
   | { type: 'set-stream-censored'; isCensored: boolean }
   | { type: 'set-stream-running'; isStreamRunning: boolean }
   | { type: 'create-invite'; role: string; name: string }
@@ -200,3 +201,60 @@ export type ControlUpdate = {
 export type ControlCommandMessage = MessageMeta & ControlCommand
 
 export type ControlUpdateMessage = MessageMeta & ControlUpdate
+
+export type ControlResponseMessage = MessageMeta & {
+  type: 'command-response'
+  result: unknown
+}
+
+export interface StreamwallDebugLogEntry {
+  id: number
+  timestamp: string
+  level: 'info' | 'warning' | 'error'
+  event: string
+  message: string
+  viewIdx?: number
+  streamId?: string
+  /** URL credentials, query parameters, and fragments are removed at collection time. */
+  url?: string
+  detail?: Record<string, string | number | boolean | null>
+}
+
+export type HlsRequestKind =
+  | 'manifest'
+  | 'playlist'
+  | 'fragment'
+  | 'key'
+  | 'other'
+
+export type HlsRequestOutcome =
+  | 'completed'
+  | 'error'
+  | 'timeout'
+  | 'aborted'
+
+export interface HlsRequestAcquireInput {
+  requestId: number
+  url: string
+  kind: HlsRequestKind
+}
+
+export type HlsRequestAcquireResult =
+  | {
+      admitted: true
+      permitId: number
+      queueWaitMs: number
+      queueDepth: number
+      hostQueueDepth: number
+      activeHostRequests: number
+    }
+  | {
+      admitted: false
+      reason: 'queue-timeout' | 'aborted' | 'unauthorized' | 'invalid-request'
+      queueWaitMs: number
+    }
+
+export interface HlsRequestReleaseInput {
+  permitId: number
+  outcome: HlsRequestOutcome
+}

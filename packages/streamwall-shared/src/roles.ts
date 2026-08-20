@@ -3,6 +3,7 @@ export const validRolesSet = new Set(validRoles)
 
 const adminActions = [
   'dev-tools',
+  'get-debug-logs',
   'browse',
   'create-invite',
   'delete-token',

@@ -1,8 +1,34 @@
-import { ipcRenderer, webFrame } from 'electron'
+import { contextBridge, ipcRenderer, webFrame } from 'electron'
 import throttle from 'lodash/throttle'
-import { ContentDisplayOptions, CropRect } from 'streamwall-shared'
+import {
+  ContentDisplayOptions,
+  CropRect,
+  HlsRequestAcquireInput,
+  HlsRequestAcquireResult,
+  HlsRequestReleaseInput,
+} from 'streamwall-shared'
 
 const SCAN_THROTTLE = 500
+
+const isLocalHlsPlayer =
+  location.pathname.endsWith('/playHLS.html') &&
+  (location.protocol === 'file:' ||
+    location.hostname === 'localhost' ||
+    location.hostname === '127.0.0.1')
+
+if (isLocalHlsPlayer) {
+  contextBridge.exposeInMainWorld('streamwallHlsRequests', {
+    acquire: (request: HlsRequestAcquireInput) =>
+      ipcRenderer.invoke(
+        'hls-request-acquire',
+        request,
+      ) as Promise<HlsRequestAcquireResult>,
+    cancel: (requestId: number) =>
+      ipcRenderer.send('hls-request-cancel', { requestId }),
+    release: (request: HlsRequestReleaseInput) =>
+      ipcRenderer.send('hls-request-release', request),
+  })
+}
 
 type RendererErrorMessage = {
   type: 'streamwall:hls-fatal'
@@ -11,15 +37,25 @@ type RendererErrorMessage = {
   src?: string | null
 }
 
+type RendererDebugMessage = {
+  type: 'streamwall:hls-log'
+  level: 'info' | 'warning' | 'error'
+  event: string
+  message?: string
+  detail?: unknown
+  src?: string | null
+}
+
 function forwardRendererError(ev: MessageEvent) {
-  const data = ev.data as RendererErrorMessage
+  const data = ev.data as RendererErrorMessage | RendererDebugMessage
   if (!data || typeof data !== 'object') {
     return
   }
-  if (data.type !== 'streamwall:hls-fatal') {
-    return
+  if (data.type === 'streamwall:hls-fatal') {
+    ipcRenderer.send('view-error', { error: data })
+  } else if (data.type === 'streamwall:hls-log') {
+    ipcRenderer.send('view-debug-log', { log: data })
   }
-  ipcRenderer.send('view-error', { error: data })
 }
 
 window.addEventListener('message', forwardRendererError)
@@ -351,8 +387,6 @@ async function main() {
 
   let rotationController: RotationController | undefined
   let cropController: CropController | undefined
-  const isLocalHlsPlayer = location.href.includes('playHLS.html')
-
   if (content.kind === 'video' || content.kind === 'audio') {
     // Avoid overriding layout for the built-in HLS player so it can manage crop/transform itself.
     if (!isLocalHlsPlayer) {

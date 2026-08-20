@@ -14,7 +14,16 @@ import {
 } from 'streamwall-shared/src/types'
 import { Actor, assign, fromPromise, setup } from 'xstate'
 import { ensureValidURL } from '../util'
+import { hlsStartupScheduler } from './hlsStartupScheduler'
 import { loadHTML } from './loadHTML'
+
+function isHlsURL(url: string) {
+  try {
+    return /\.m3u8?$/i.test(new URL(url).pathname)
+  } catch {
+    return /\.m3u8?(?:$|[?#])/i.test(url)
+  }
+}
 
 const viewStateMachine = setup({
   types: {
@@ -146,12 +155,14 @@ const viewStateMachine = setup({
     loadPage: fromPromise(
       async ({
         input: { content, view, options },
+        signal,
       }: {
         input: {
           content: ViewContent | null
           view: WebContentsView
           options: ContentDisplayOptions | null
         }
+        signal: AbortSignal
       }) => {
         assert(content !== null)
 
@@ -159,12 +170,31 @@ const viewStateMachine = setup({
         const wc = view.webContents
         wc.audioMuted = true
 
-        if (/\.m3u8?$/.test(content.url)) {
-              const query: Record<string, string> = { src: content.url }
-              if (options?.crop) {
-                query.crop = Buffer.from(JSON.stringify(options.crop)).toString('base64')
-              }
-              loadHTML(wc, 'playHLS', { query })
+        if (isHlsURL(content.url)) {
+          const admission = await hlsStartupScheduler.waitForStart(
+            wc.id,
+            signal,
+          )
+          if (signal.aborted || wc.isDestroyed()) {
+            hlsStartupScheduler.release(wc.id)
+            return
+          }
+
+          const query: Record<string, string> = {
+            src: content.url,
+            activeStartups: String(admission.activeStartups),
+            queuedStartups: String(admission.queuedStartups),
+            queueWaitMs: String(admission.queueWaitMs),
+          }
+          if (options?.crop) {
+            query.crop = Buffer.from(JSON.stringify(options.crop)).toString('base64')
+          }
+          try {
+            loadHTML(wc, 'playHLS', { query })
+          } catch (error) {
+            hlsStartupScheduler.release(wc.id)
+            throw error
+          }
         } else {
           wc.loadURL(content.url)
         }

@@ -1,0 +1,5 @@
+import './main/hlsRequestScheduler.test'
+import './main/hlsStartupScheduler.test'
+import './renderer/coalescingReporter.test'
+import './renderer/hlsTrafficCameraConfig.test'
+import './renderer/scheduledHlsLoader.test'

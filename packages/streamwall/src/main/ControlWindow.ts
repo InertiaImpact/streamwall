@@ -8,7 +8,7 @@ import type { WebContents } from 'electron'
 export interface ControlWindowEventMap {
   load: []
   close: []
-  command: [ControlCommand]
+  command: [ControlCommand, (response: unknown) => void]
   ydoc: [Uint8Array]
 }
 
@@ -114,7 +114,11 @@ export default class ControlWindow extends EventEmitter<ControlWindowEventMap> {
       if (ev.sender !== this.win.webContents) {
         return
       }
-      this.emit('command', command)
+      return new Promise((resolve) => {
+        if (!this.emit('command', command, resolve)) {
+          resolve(undefined)
+        }
+      })
     })
 
     ipcMain.handle('control:ydoc', (ev, update) => {

@@ -38,6 +38,7 @@ import {
   roleCan,
   StreamData,
   StreamDelayStatus,
+  StreamwallDebugLogEntry,
   StreamwallRole,
   StreamwallState,
   StreamWindowConfig,
@@ -783,6 +784,41 @@ export function ControlUI({
   const handleChangeShowDebug = useCallback(() => {
     setShowDebug((prev) => !prev)
   }, [])
+  const [debugLogs, setDebugLogs] = useState<StreamwallDebugLogEntry[]>([])
+  const [debugLogError, setDebugLogError] = useState<string>()
+  const canReadDebugLogs = roleCan(role, 'get-debug-logs')
+  const refreshDebugLogs = useCallback(() => {
+    send(
+      { type: 'get-debug-logs', gridId: activeGridId ?? undefined },
+      (response) => {
+        const result = response as
+          | { logs?: StreamwallDebugLogEntry[]; error?: string }
+          | undefined
+        if (result?.error) {
+          setDebugLogError(result.error)
+          return
+        }
+        if (Array.isArray(result?.logs)) {
+          setDebugLogs(result.logs)
+          setDebugLogError(undefined)
+        } else {
+          setDebugLogError('No diagnostic response received')
+        }
+      },
+    )
+  }, [activeGridId, send])
+
+  useEffect(() => {
+    if (!showDebug || !canReadDebugLogs) {
+      setDebugLogs([])
+      setDebugLogError(undefined)
+      return
+    }
+
+    refreshDebugLogs()
+    const interval = window.setInterval(refreshDebugLogs, 2_000)
+    return () => window.clearInterval(interval)
+  }, [canReadDebugLogs, refreshDebugLogs, showDebug])
 
   const isLocalControlPage = useMemo(() => {
     const host = window.location.hostname
@@ -927,7 +963,7 @@ export function ControlUI({
       }
       const interval = window.setInterval(() => {
         send({ type: 'refresh-errored-views', gridId })
-      }, 5000)
+      }, 30_000)
       intervals.push(interval)
     })
 
@@ -2143,6 +2179,81 @@ export function ControlUI({
                     {showDebug ? '✓ Debug Tools ON' : 'Debug Tools OFF'}
                   </button>
                 </div>
+              )}
+
+              {showDebug && canReadDebugLogs && (
+                <section
+                  style={{
+                    width: 'min(720px, 60vw)',
+                    marginBottom: '16px',
+                    padding: '10px',
+                    border: '1px solid #455a64',
+                    borderRadius: '4px',
+                    backgroundColor: '#101820',
+                    color: '#eceff1',
+                    fontSize: '11px',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
+                    <strong>
+                      Recent stream diagnostics — {activeGridId ?? 'default grid'}
+                    </strong>
+                    <button
+                      type="button"
+                      onClick={refreshDebugLogs}
+                      style={{
+                        padding: '4px 8px',
+                        border: '1px solid #607d8b',
+                        borderRadius: '3px',
+                        backgroundColor: '#263238',
+                        color: '#eceff1',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Refresh now
+                    </button>
+                  </div>
+                  <div style={{ margin: '6px 0', color: '#90a4ae' }}>
+                    In-memory only; URL credentials, query parameters, and fragments are removed.
+                  </div>
+                  {debugLogError && (
+                    <div style={{ marginBottom: '6px', color: '#ef9a9a' }}>
+                      {debugLogError}
+                    </div>
+                  )}
+                  <pre
+                    style={{
+                      maxHeight: '280px',
+                      margin: 0,
+                      overflow: 'auto',
+                      whiteSpace: 'pre-wrap',
+                      overflowWrap: 'anywhere',
+                      userSelect: 'text',
+                    }}
+                  >
+                    {debugLogs.length > 0
+                      ? debugLogs
+                          .slice()
+                          .reverse()
+                          .map((entry) => {
+                            const location = [
+                              entry.viewIdx != null ? `view ${entry.viewIdx + 1}` : '',
+                              entry.streamId ?? '',
+                            ]
+                              .filter(Boolean)
+                              .join(' ')
+                            return [
+                              `${new Date(entry.timestamp).toLocaleTimeString()} [${entry.level.toUpperCase()}] ${location} — ${entry.message}`,
+                              entry.url,
+                              entry.detail ? JSON.stringify(entry.detail) : undefined,
+                            ]
+                              .filter(Boolean)
+                              .join('\n')
+                          })
+                          .join('\n\n')
+                      : 'No stream diagnostics have been recorded yet.'}
+                  </pre>
+                </section>
               )}
               
               {roleCan(role, 'refresh-all-views') && (

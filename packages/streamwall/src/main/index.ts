@@ -9,7 +9,12 @@ import EventEmitter from 'node:events'
 import { join, isAbsolute, dirname } from 'node:path'
 import ReconnectingWebSocket from 'reconnecting-websocket'
 import 'source-map-support/register'
-import { ControlCommand, StreamwallState, ViewState } from 'streamwall-shared'
+import {
+  ControlCommand,
+  ControlResponseMessage,
+  StreamwallState,
+  ViewState,
+} from 'streamwall-shared'
 import { updateElectronApp } from 'update-electron-app'
 import WebSocket from 'ws'
 import yargs from 'yargs'
@@ -1243,6 +1248,11 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     | { type: 'set-refresh-schedule'; enabled: boolean; time: string }
     | { type: 'set-label-font-size'; fontSize: number }
 
+  type RemoteControlCommand = ExtendedControlCommand & {
+    id?: number
+    clientId?: string
+  }
+
   const onCommand = async (msg: ExtendedControlCommand) => {
     if (!msg || typeof msg !== 'object' || typeof (msg as any).type !== 'string') {
       console.warn('Ignoring command with missing type', msg)
@@ -1344,6 +1354,10 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           streamdelayClient.setStreamRunning(msg.isStreamRunning)
         }
         break
+      case 'get-debug-logs': {
+        const grid = getGridRuntime(msg.gridId)
+        return { gridId: grid.id, logs: grid.window.getDebugLogs() }
+      }
       case 'refresh-all-views':
         console.debug('Refreshing all views sequentially...')
         getGridRuntime(msg.gridId).window.refreshAllViewsSequentially()
@@ -1755,12 +1769,16 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   // Control -> main
   controlWindow.on('ydoc', (update) => Y.applyUpdate(stateDoc, update))
-  controlWindow.on('command', (command) => {
+  controlWindow.on('command', (command, respond) => {
     if ((command as any)?.error) {
       console.warn('Control window reported error:', (command as any).error)
+      respond({ error: 'invalid command' })
       return
     }
-    onCommand(command)
+    void onCommand(command).then(respond, (error) => {
+      console.error('Failed to handle local control command:', error)
+      respond({ error: 'command failed' })
+    })
   })
 
   // TODO: Hide on macOS, allow reopening from dock
@@ -1824,7 +1842,40 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           return
         }
 
-        onCommand(msg as ExtendedControlCommand)
+        const command = msg as RemoteControlCommand
+        void onCommand(command).then(
+          (result) => {
+            if (
+              typeof command.id !== 'number' ||
+              typeof command.clientId !== 'string'
+            ) {
+              return
+            }
+            const response: ControlResponseMessage = {
+              type: 'command-response',
+              id: command.id,
+              clientId: command.clientId,
+              result,
+            }
+            ws.send(JSON.stringify(response))
+          },
+          (error) => {
+            console.error('Failed to handle remote control command:', error)
+            if (
+              typeof command.id !== 'number' ||
+              typeof command.clientId !== 'string'
+            ) {
+              return
+            }
+            const response: ControlResponseMessage = {
+              type: 'command-response',
+              id: command.id,
+              clientId: command.clientId,
+              result: { error: 'command failed' },
+            }
+            ws.send(JSON.stringify(response))
+          },
+        )
       }
     })
     stateEmitter.on('state', () => {
