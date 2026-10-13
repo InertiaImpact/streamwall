@@ -36,6 +36,10 @@ function Overlay({
   const { width, height, activeColor } = config
   const [expandedUrl, setExpandedUrl] = useState<string | undefined>()
   const [expandedStreamId, setExpandedStreamId] = useState<string | undefined>()
+  const [spotlightPhase, setSpotlightPhase] = useState<
+    'preparing' | 'open' | 'closing' | null
+  >(null)
+  const [frameExpanded, setFrameExpanded] = useState(false)
 
   const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
     window.streamwallLayer.spotlight(url, streamId)
@@ -45,10 +49,15 @@ function Overlay({
   useEffect(() => {
     console.debug('Setting up spotlight listener')
     const unsubscribe = window.streamwallLayer.onSpotlight(
-      (url?: string, streamId?: string) => {
+      (
+        url?: string,
+        streamId?: string,
+        phase?: 'preparing' | 'open' | 'closing' | null,
+      ) => {
         console.debug('Received spotlight message for URL:', url, streamId)
         setExpandedUrl(url)
         setExpandedStreamId(streamId)
+        setSpotlightPhase(phase ?? null)
       },
     )
     return unsubscribe
@@ -72,12 +81,28 @@ function Overlay({
   }, [streams])
   
   const expandedKey = expandedStreamId ?? expandedUrl
+  useEffect(() => {
+    if (spotlightPhase !== 'open') {
+      setFrameExpanded(false)
+      return
+    }
+    const frame = requestAnimationFrame(() => setFrameExpanded(true))
+    return () => cancelAnimationFrame(frame)
+  }, [expandedKey, spotlightPhase])
   
   const activeViews = views.filter(
     ({ state }) =>
       matchesState('displaying', state) &&
       !matchesState('displaying.error', state),
   )
+  const expandedView = activeViews.find(({ context }) =>
+    expandedKey === (context.content?.streamId ?? context.content?.url),
+  )
+  const expandedContent = expandedView?.context.content
+  const expandedPos = expandedView?.context.pos
+  const expandedData = expandedContent?.streamId
+    ? streamsById.get(expandedContent.streamId)
+    : expandedContent?.url ? streamsByUrl.get(expandedContent.url)?.[0] : undefined
   const overlays = streams.filter((s) => s.kind === 'overlay')
   return (
     <OverlayContainer>
@@ -109,8 +134,12 @@ function Overlay({
         const isLoading = matchesState('displaying.loading', state)
         const hasTitle = data && (data.label || data.source)
         const position = data?.labelPosition ?? 'top-left'
-        const isExpanded = expandedKey === (content.streamId ?? content.url)
-        const isObscured = expandedKey != null && !isExpanded
+        const isExpanded = expandedKey === (content.streamId ?? content.url) &&
+          spotlightPhase !== 'preparing'
+        const isPreparing = expandedKey === (content.streamId ?? content.url) &&
+          spotlightPhase === 'preparing'
+        const isObscured = spotlightPhase !== 'preparing' &&
+          expandedKey != null && !isExpanded
         return (
           <div key={`${pos.spaces.join('-')}`}>
             <SpaceBorder
@@ -119,13 +148,13 @@ function Overlay({
               windowHeight={height}
               activeColor={activeColor}
               isListening={isListening}
-              isExpanded={isExpanded}
+              isExpanded={false}
               isObscured={isObscured}
               isHighlighted={isExpanded}
               onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
-              {!isObscured && isBlurred && <BlurCover />}
+              {!isObscured && (isBlurred || isExpanded) && <BlurCover />}
               {!isObscured && hasTitle && (
                 <StreamTitle
                   position={position}
@@ -148,10 +177,33 @@ function Overlay({
                 </StreamTitle>
               )}
               {!isObscured && isLoading && <LoadingSpinner />}
+              {isPreparing && <PreparingLabel>Opening enlarged view…</PreparingLabel>}
             </SpaceBorder>
           </div>
         )
       })}
+      {expandedContent && expandedPos && spotlightPhase !== 'preparing' && (
+        <SpotlightFrame
+          $pos={expandedPos}
+          $expanded={frameExpanded}
+          onClick={() => toggleSpotlight(
+            expandedContent.streamId,
+            expandedContent.url,
+          )}
+        >
+          {expandedData && (expandedData.label || expandedData.source) && (
+            <StreamTitle
+              position={expandedData.labelPosition ?? 'top-left'}
+              activeColor={activeColor}
+              fontSize={overlayLabelFontSize}
+              isListening={false}
+            >
+              <StreamIcon url={expandedContent.url} />
+              <span>{expandedData.label ?? expandedData.source}</span>
+            </StreamTitle>
+          )}
+        </SpotlightFrame>
+      )}
       {overlays.map((s) => (
         <OverlayIFrame
           key={s._id}
@@ -274,6 +326,38 @@ const SpaceBorder = styled.div.attrs(() => ({
   z-index: ${({ isExpanded }) => isExpanded ? 1000 : 1};
   pointer-events: auto;
   user-select: none;
+`
+
+const SpotlightFrame = styled.div<{ $pos: { x: number; y: number; width: number; height: number }; $expanded: boolean }>`
+  position: fixed;
+  left: ${({ $pos, $expanded }) => $expanded ? '10vw' : `${$pos.x}px`};
+  top: ${({ $pos, $expanded }) => $expanded ? '10vh' : `${$pos.y}px`};
+  width: ${({ $pos, $expanded }) => $expanded ? '80vw' : `${$pos.width}px`};
+  height: ${({ $pos, $expanded }) => $expanded ? '80vh' : `${$pos.height}px`};
+  z-index: 1000;
+  box-sizing: border-box;
+  border: 2px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+  transition: left 300ms cubic-bezier(0.33, 1, 0.68, 1),
+    top 300ms cubic-bezier(0.33, 1, 0.68, 1),
+    width 300ms cubic-bezier(0.33, 1, 0.68, 1),
+    height 300ms cubic-bezier(0.33, 1, 0.68, 1);
+  cursor: pointer;
+  pointer-events: auto;
+`
+
+const PreparingLabel = styled.div`
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  padding: 3px 7px;
+  border-radius: 3px;
+  color: white;
+  background: rgba(0, 0, 0, 0.7);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
 `
 
 const StreamTitle = styled.div`

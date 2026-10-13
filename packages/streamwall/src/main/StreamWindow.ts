@@ -1,5 +1,5 @@
 import assert from 'assert'
-import { app, BrowserWindow, ipcMain, WebContents, WebContentsView } from 'electron'
+import { app, BrowserWindow, ipcMain, Rectangle, WebContents, WebContentsView } from 'electron'
 import EventEmitter from 'events'
 import fs from 'fs'
 import intersection from 'lodash/intersection'
@@ -41,6 +41,8 @@ import viewStateMachine, { ViewActor } from './viewStateMachine'
 const DEBUG_LOG_LIMIT = 250
 const MEDIA_HEALTH_LOG_LIMIT_BYTES = 8 * 1024 * 1024
 const MEDIA_HEALTH_FRESH_MS = 25_000
+const SPOTLIGHT_ANIMATION_MS = 300
+const SPOTLIGHT_START_TIMEOUT_MS = 75_000
 
 interface MediaHealthSample {
   sampledAt: number
@@ -270,7 +272,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   hlsRequestTelemetry = new Map<string, HlsRequestTelemetryBucket>()
   mediaHealth = new Map<number, MediaHealthSample>()
   private spotlightToken: string | null = null
-  private spotlightViewId: number | null = null
+  private spotlightActor: ViewActor | null = null
+  private spotlightSourceId: number | null = null
+  private spotlightSourceWasBlurred = false
+  private spotlightPhase: 'preparing' | 'open' | 'closing' | null = null
+  private spotlightSubscription?: { unsubscribe(): void }
+  private spotlightStartTimer?: NodeJS.Timeout
+  private spotlightAnimation?: NodeJS.Timeout
+  private spotlightAnimationGeneration = 0
   static ipcRegistered = false
   static senderToWindow = new Map<number, StreamWindow>()
   static nextHlsMediaSessionPool = 0
@@ -341,7 +350,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     )
     win.on('show', () => console.log('[grid] show'))
     win.on('closed', () => console.log('[grid] closed'))
-    win.on('close', () => this.emit('close'))
+    win.on('close', () => {
+      this.finishSpotlight()
+      this.emit('close')
+    })
     win.on('unresponsive', () => console.warn('[grid] unresponsive'))
     win.webContents.on('render-process-gone', (_e, details) => {
       console.warn('[grid] render-process-gone', details)
@@ -863,7 +875,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   }
 
   private findActor(viewId: number) {
-    return this.views.get(viewId) ?? this.probeViews.get(viewId)
+    const spotlight = this.spotlightActor
+    return this.views.get(viewId) ?? this.probeViews.get(viewId) ??
+      (spotlight?.getSnapshot().context.id === viewId ? spotlight : undefined)
   }
 
   private markProbePlaybackStarted(viewId: number) {
@@ -985,6 +999,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     )
     StreamWindow.registerSender(viewId, this)
     view.webContents.once('destroyed', () => {
+      if (this.spotlightActor?.getSnapshot().context.id === viewId) {
+        this.finishSpotlight()
+      }
       this.mediaHealth.delete(viewId)
       this.forgetProbe(viewId)
       hlsStartupScheduler.cancel(viewId)
@@ -1011,13 +1028,13 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         return
       }
       lastSnapshot = snapshot
-      if (
-        this.spotlightToken &&
-        snapshot.matches({ displaying: 'running' }) &&
-        (snapshot.context.content?.streamId === this.spotlightToken ||
-          snapshot.context.content?.url === this.spotlightToken)
-      ) {
-        this.applySpotlight()
+      if (this.spotlightSourceId === viewId &&
+          this.spotlightPhase === 'preparing' && !this.spotlightActor) {
+        if (snapshot.matches({ displaying: 'running' })) {
+          this.prepareSpotlightDuplicate(actor)
+        } else if (snapshot.matches({ displaying: 'error' })) {
+          this.finishSpotlight()
+        }
       }
       if (this.views.has(viewId)) this.emitState()
     })
@@ -1273,7 +1290,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.syncSpotlightOverlay()
     this.backgroundView.webContents.send('state', state)
 
-    for (const view of this.views.values()) {
+    for (const view of this.spotlightActor
+      ? [...this.views.values(), this.spotlightActor]
+      : this.views.values()) {
       const { content } = view.getSnapshot().context
       if (!content) {
         continue
@@ -1308,22 +1327,206 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   }
 
   private setSpotlight(token: string | null) {
-    if (this.spotlightToken === token) return
-    if (this.spotlightViewId !== null) {
-      const previous = this.views.get(this.spotlightViewId)?.getSnapshot().context
-      if (previous?.pos && !previous.view.webContents.isDestroyed()) {
-        try {
-          previous.view.setBounds(previous.pos)
-        } catch (error) {
-          console.warn('[spotlight] failed to restore view bounds', error)
-        }
+    if (token === this.spotlightToken && this.spotlightPhase !== 'closing') return
+    if (token === null) {
+      if (this.spotlightPhase !== 'open' || !this.spotlightActor) {
+        this.finishSpotlight()
+        return
       }
-      this.spotlightViewId = null
+      const source = this.views.get(this.spotlightSourceId ?? -1)
+      const destination = source?.getSnapshot().context.pos
+      const view = this.spotlightActor.getSnapshot().context.view
+      if (!destination || view.webContents.isDestroyed()) {
+        this.finishSpotlight()
+        return
+      }
+      this.spotlightPhase = 'closing'
+      this.syncSpotlightOverlay()
+      this.animateSpotlight(view, view.getBounds(), destination, () =>
+        this.finishSpotlight(),
+      )
+      return
     }
+
+    this.finishSpotlight()
+    const source = this.findSpotlightView(token)
+    const snapshot = source?.getSnapshot()
+    const content = snapshot?.context.content
+    if (!source || !snapshot || !content || !snapshot.context.pos ||
+        snapshot.matches({ displaying: 'error' })) return
+
     this.spotlightToken = token
-    this.applySpotlight()
+    this.spotlightSourceId = snapshot.context.id
+    this.spotlightPhase = 'preparing'
+    this.spotlightStartTimer = setTimeout(() => {
+      if (this.spotlightToken !== token || this.spotlightPhase !== 'preparing') return
+      console.warn('[spotlight] stream timed out while opening', token)
+      this.finishSpotlight()
+    }, SPOTLIGHT_START_TIMEOUT_MS)
     this.syncSpotlightOverlay()
-    this.emit('spotlight-changed', this.spotlightToken)
+    this.emit('spotlight-changed', token)
+    if (snapshot.matches({ displaying: 'running' })) {
+      this.prepareSpotlightDuplicate(source)
+    }
+  }
+
+  private prepareSpotlightDuplicate(source: ViewActor) {
+    if (this.spotlightPhase !== 'preparing' || this.spotlightActor ||
+        source.getSnapshot().context.id !== this.spotlightSourceId) return
+    const snapshot = source.getSnapshot()
+    const content = snapshot.context.content
+    const token = this.spotlightToken
+    if (!content || !token || !snapshot.matches({ displaying: 'running' })) return
+    let actor: ViewActor
+    try {
+      actor = this.createView(content)
+    } catch (error) {
+      console.warn('[spotlight] failed to create duplicate view', error)
+      this.finishSpotlight()
+      return
+    }
+    this.spotlightActor = actor
+    this.spotlightSubscription = actor.subscribe((next) => {
+      if (this.spotlightActor !== actor) return
+      if (next.matches({ displaying: 'error' })) {
+        console.warn('[spotlight] duplicate stream failed to load', token)
+        this.finishSpotlight()
+      } else if (this.spotlightPhase === 'preparing' &&
+          next.matches({ displaying: 'running' })) {
+        this.openSpotlight()
+      }
+    })
+    actor.send({ type: 'OPTIONS', options: snapshot.context.options ?? {} })
+    actor.send({
+      type: 'DISPLAY',
+      content,
+      pos: { x: -2, y: -2, width: 1, height: 1, spaces: [] },
+    })
+  }
+
+  private openSpotlight() {
+    const actor = this.spotlightActor
+    const source = this.views.get(this.spotlightSourceId ?? -1)
+    const sourceSnapshot = source?.getSnapshot()
+    const from = sourceSnapshot?.context.pos
+    if (!actor || !source || !from ||
+        !sourceSnapshot.matches({ displaying: 'running' }) ||
+        this.win.isDestroyed()) {
+      this.finishSpotlight()
+      return
+    }
+    const view = actor.getSnapshot().context.view
+    if (view.webContents.isDestroyed()) {
+      this.finishSpotlight()
+      return
+    }
+    if (this.spotlightStartTimer) clearTimeout(this.spotlightStartTimer)
+    this.spotlightStartTimer = undefined
+    this.spotlightSourceWasBlurred = sourceSnapshot.matches(
+      'displaying.running.video.blurred',
+    )
+    this.spotlightPhase = 'open'
+    try {
+      this.win.contentView.addChildView(
+        view,
+        this.win.contentView.children.length - 2,
+      )
+      view.setBounds(from)
+      if (!this.spotlightSourceWasBlurred) source.send({ type: 'BLUR' })
+      this.syncSpotlightOverlay()
+      this.animateSpotlight(view, from, this.spotlightBounds(), () =>
+        this.applySpotlight(),
+      )
+    } catch (error) {
+      console.warn('[spotlight] failed to open duplicate view', error)
+      this.finishSpotlight()
+    }
+  }
+
+  private spotlightBounds(): Rectangle {
+    const bounds = this.win.getContentBounds()
+    const width = Math.max(1, Math.round(bounds.width * 0.8))
+    const height = Math.max(1, Math.round(bounds.height * 0.8))
+    return {
+      x: Math.round((bounds.width - width) / 2),
+      y: Math.round((bounds.height - height) / 2),
+      width,
+      height,
+    }
+  }
+
+  private animateSpotlight(
+    view: WebContentsView,
+    from: Rectangle,
+    to: Rectangle,
+    onDone: () => void,
+  ) {
+    if (this.spotlightAnimation) clearTimeout(this.spotlightAnimation)
+    this.spotlightAnimation = undefined
+    const generation = ++this.spotlightAnimationGeneration
+    const started = Date.now()
+    const step = () => {
+      if (generation !== this.spotlightAnimationGeneration ||
+          view.webContents.isDestroyed() || this.win.isDestroyed()) return
+      const progress = Math.min(1, (Date.now() - started) / SPOTLIGHT_ANIMATION_MS)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      const value = (start: number, end: number) =>
+        Math.round(start + (end - start) * eased)
+      try {
+        view.setBounds({
+          x: value(from.x, to.x),
+          y: value(from.y, to.y),
+          width: Math.max(1, value(from.width, to.width)),
+          height: Math.max(1, value(from.height, to.height)),
+        })
+      } catch (error) {
+        console.warn('[spotlight] failed to animate view', error)
+        onDone()
+        return
+      }
+      if (progress < 1) {
+        this.spotlightAnimation = setTimeout(step, 16)
+      } else {
+        this.spotlightAnimation = undefined
+        onDone()
+      }
+    }
+    step()
+  }
+
+  private finishSpotlight() {
+    const token = this.spotlightToken
+    if (this.spotlightStartTimer) clearTimeout(this.spotlightStartTimer)
+    if (this.spotlightAnimation) clearTimeout(this.spotlightAnimation)
+    ++this.spotlightAnimationGeneration
+    this.spotlightStartTimer = this.spotlightAnimation = undefined
+    this.spotlightSubscription?.unsubscribe()
+    this.spotlightSubscription = undefined
+    const actor = this.spotlightActor
+    const source = this.views.get(this.spotlightSourceId ?? -1)
+    const shouldUnblur = !this.spotlightSourceWasBlurred && this.spotlightPhase !== 'preparing'
+    this.spotlightActor = null
+    this.spotlightSourceId = null
+    this.spotlightSourceWasBlurred = false
+    this.spotlightToken = null
+    this.spotlightPhase = null
+    if (actor) {
+      const view = actor.getSnapshot().context.view
+      hlsStartupScheduler.cancel(view.webContents.id)
+      if (!this.win.isDestroyed()) {
+        try { this.win.contentView.removeChildView(view) } catch { /* detached */ }
+      }
+      if (!view.webContents.isDestroyed()) view.webContents.close()
+      actor.stop()
+    }
+    if (shouldUnblur && source &&
+        !source.getSnapshot().context.view.webContents.isDestroyed()) {
+      source.send({ type: 'UNBLUR' })
+    }
+    if (token !== null) {
+      this.syncSpotlightOverlay()
+      this.emit('spotlight-changed', null)
+    }
   }
 
   private syncSpotlightOverlay() {
@@ -1332,49 +1535,35 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.overlayView.webContents.send('spotlight', {
       url: selected?.url,
       streamId: selected?.streamId,
+      phase: this.spotlightPhase,
     })
   }
 
-  private findSpotlightView() {
-    if (!this.spotlightToken) return undefined
+  private findSpotlightView(token = this.spotlightToken) {
+    if (!token) return undefined
     return Array.from(this.views.values()).find((view) => {
       const content = view.getSnapshot().context.content
       return (
-        content?.streamId === this.spotlightToken ||
-        content?.url === this.spotlightToken
+        content?.streamId === token ||
+        content?.url === token
       )
     })
   }
 
   private applySpotlight() {
     if (!this.spotlightToken) return
-    const actor = this.findSpotlightView()
-    if (!actor) {
-      this.setSpotlight(null)
+    const source = this.findSpotlightView()
+    if (!source || source.getSnapshot().context.id !== this.spotlightSourceId) {
+      this.finishSpotlight()
       return
     }
-    const snapshot = actor.getSnapshot()
-    if (!snapshot.matches({ displaying: 'running' })) return
-    const view = snapshot.context.view
-    if (view.webContents.isDestroyed() || this.win.isDestroyed()) return
-    const bounds = this.win.getContentBounds()
-    const width = Math.max(1, Math.round(bounds.width * 0.8))
-    const height = Math.max(1, Math.round(bounds.height * 0.8))
-    try {
-      // Keep the existing player above other tiles and below the clickable overlay.
-      this.win.contentView.addChildView(
-        view,
-        this.win.contentView.children.length - 2,
-      )
-      view.setBounds({
-        x: Math.round((bounds.width - width) / 2),
-        y: Math.round((bounds.height - height) / 2),
-        width,
-        height,
-      })
-      this.spotlightViewId = snapshot.context.id
-    } catch (error) {
-      console.warn('[spotlight] failed to enlarge view', error)
+    if (this.spotlightPhase === 'preparing' && !this.spotlightActor &&
+        source.getSnapshot().matches({ displaying: 'running' })) {
+      this.prepareSpotlightDuplicate(source)
     }
+    if (this.spotlightPhase !== 'open' || this.spotlightAnimation ||
+        !this.spotlightActor || this.win.isDestroyed()) return
+    const view = this.spotlightActor.getSnapshot().context.view
+    if (!view.webContents.isDestroyed()) view.setBounds(this.spotlightBounds())
   }
 }

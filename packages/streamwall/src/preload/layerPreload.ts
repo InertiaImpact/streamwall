@@ -13,11 +13,19 @@ const api = {
       ipcRenderer.off('state', internalHandler)
     }
   },
-  onSpotlight: (handleSpotlight: (url?: string, streamId?: string) => void) => {
+  onSpotlight: (handleSpotlight: (
+    url?: string,
+    streamId?: string,
+    phase?: 'preparing' | 'open' | 'closing' | null,
+  ) => void) => {
     const internalHandler = (
       _ev: IpcRendererEvent,
-      payload: { url?: string; streamId?: string },
-    ) => handleSpotlight(payload?.url, payload?.streamId)
+      payload: {
+        url?: string
+        streamId?: string
+        phase?: 'preparing' | 'open' | 'closing' | null
+      },
+    ) => handleSpotlight(payload?.url, payload?.streamId, payload?.phase)
     ipcRenderer.on('spotlight', internalHandler)
     return () => {
       ipcRenderer.off('spotlight', internalHandler)
