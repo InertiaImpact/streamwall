@@ -1,6 +1,7 @@
 import assert from 'assert'
 import { app, BrowserWindow, ipcMain, WebContents, WebContentsView } from 'electron'
 import EventEmitter from 'events'
+import fs from 'fs'
 import intersection from 'lodash/intersection'
 import isEqual from 'lodash/isEqual'
 import path from 'path'
@@ -38,6 +39,56 @@ import { createRuntimeDiagnostics } from './runtimeDiagnostics'
 import viewStateMachine, { ViewActor } from './viewStateMachine'
 
 const DEBUG_LOG_LIMIT = 250
+const MEDIA_HEALTH_LOG_LIMIT_BYTES = 8 * 1024 * 1024
+const MEDIA_HEALTH_FRESH_MS = 25_000
+
+interface MediaHealthSample {
+  sampledAt: number
+  elapsedMs: number
+  presentedFrames: number | null
+  droppedFrames: number | null
+  advancedSeconds: number
+  bufferedAheadSeconds: number
+  readyState: number
+  paused: boolean
+  playbackRate: number
+  width: number
+  height: number
+}
+
+function parseMediaHealthSample(value: unknown): MediaHealthSample | undefined {
+  const sample = asRecord(value)
+  if (!sample) return undefined
+  const bounded = (key: string, max: number) => {
+    const number = sample[key]
+    return typeof number === 'number' && Number.isFinite(number) &&
+      number >= 0 && number <= max ? number : undefined
+  }
+  const elapsedMs = bounded('elapsedMs', 120_000)
+  const presentedFrames = sample.presentedFrames === null
+    ? null : bounded('presentedFrames', 100_000)
+  const droppedFrames = sample.droppedFrames === null
+    ? null : bounded('droppedFrames', 100_000)
+  const advancedSeconds = bounded('advancedSeconds', 10_000)
+  const bufferedAheadSeconds = bounded('bufferedAheadSeconds', 3_600)
+  const readyState = bounded('readyState', 4)
+  const playbackRate = bounded('playbackRate', 16)
+  const width = bounded('width', 16_384)
+  const height = bounded('height', 16_384)
+  if (
+    elapsedMs === undefined || elapsedMs === 0 || presentedFrames === undefined ||
+    droppedFrames === undefined || advancedSeconds === undefined ||
+    bufferedAheadSeconds === undefined || readyState === undefined ||
+    playbackRate === undefined ||
+    width === undefined || height === undefined ||
+    typeof sample.paused !== 'boolean'
+  ) return undefined
+  return {
+    sampledAt: Date.now(), elapsedMs, presentedFrames, droppedFrames,
+    advancedSeconds, bufferedAheadSeconds, readyState,
+    paused: sample.paused, playbackRate, width, height,
+  }
+}
 const HLS_REQUEST_TELEMETRY_WINDOW_MS = 10_000
 const DEBUG_DETAIL_KEYS = new Set([
   'type',
@@ -213,11 +264,38 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   debugLogs: StreamwallDebugLogEntry[] = []
   nextDebugLogId = 1
   hlsRequestTelemetry = new Map<string, HlsRequestTelemetryBucket>()
+  mediaHealth = new Map<number, MediaHealthSample>()
   private spotlightToken: string | null = null
   private spotlightViewId: number | null = null
   static ipcRegistered = false
   static senderToWindow = new Map<number, StreamWindow>()
   static nextHlsMediaSessionPool = 0
+  static mediaHealthEnabled = false
+  static mediaHealthWindows = new Set<StreamWindow>()
+  static mediaHealthWrite = Promise.resolve()
+
+  static configureMediaHealth(enabled: boolean) {
+    if (!enabled || StreamWindow.mediaHealthEnabled) return
+    StreamWindow.mediaHealthEnabled = true
+    const logPath = path.join(app.getPath('userData'), 'media-health.jsonl')
+    console.log('[media health] writing snapshots to', logPath)
+    setInterval(() => {
+      const now = Date.now()
+      const grids = Array.from(StreamWindow.mediaHealthWindows, (grid) =>
+        grid.getMediaHealthSnapshot(now),
+      )
+      const line = JSON.stringify({ timestamp: new Date(now).toISOString(), grids }) + '\n'
+      StreamWindow.mediaHealthWrite = StreamWindow.mediaHealthWrite
+        .then(async () => {
+          const size = await fs.promises.stat(logPath)
+            .then((stat) => stat.size, () => 0)
+          await fs.promises.writeFile(logPath, line, {
+            flag: size >= MEDIA_HEALTH_LOG_LIMIT_BYTES ? 'w' : 'a',
+          })
+        })
+        .catch((error) => console.warn('[media health] log write failed', error))
+    }, 30_000).unref()
+  }
 
   constructor(config: StreamWindowConfig) {
     super()
@@ -280,6 +358,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       win.show()
     })
     this.win = win
+    if (StreamWindow.mediaHealthEnabled) {
+      StreamWindow.mediaHealthWindows.add(this)
+      win.on('closed', () => StreamWindow.mediaHealthWindows.delete(this))
+    }
 
     const backgroundView = new WebContentsView({
       webPreferences: {
@@ -372,7 +454,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       if (view) {
         view.send({ type: 'VIEW_INIT' })
         const { content, options } = view.getSnapshot().context
-        return { content, options }
+        return { content, options, mediaHealthEnabled: StreamWindow.mediaHealthEnabled }
       }
     })
 
@@ -471,6 +553,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       StreamWindow.senderToWindow
         .get(ev.sender.id)
         ?.recordRendererLog(ev.sender.id, log)
+    })
+
+    ipcMain.on('view-media-health', (ev, value: unknown) => {
+      if (!StreamWindow.mediaHealthEnabled) return
+      const inst = StreamWindow.senderToWindow.get(ev.sender.id)
+      if (!inst || !inst.views.has(ev.sender.id)) return
+      const sample = parseMediaHealthSample(value)
+      if (sample) inst.mediaHealth.set(ev.sender.id, sample)
     })
 
     ipcMain.on('devtools-overlay', (ev) => {
@@ -733,6 +823,32 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     })
   }
 
+  getMediaHealthSnapshot(now = Date.now()) {
+    const views = Array.from(this.mediaHealth, ([viewId, sample]) => {
+      const context = this.views.get(viewId)?.getSnapshot().context
+      if (!context || now - sample.sampledAt > MEDIA_HEALTH_FRESH_MS) {
+        this.mediaHealth.delete(viewId)
+        return undefined
+      }
+      return {
+        viewIdx: context.pos?.spaces[0],
+        streamId: context.content?.streamId,
+        rendererPid: context.view.webContents.getOSProcessId(),
+        fps: sample.presentedFrames === null ? null :
+          Math.round(sample.presentedFrames * 1000 / sample.elapsedMs * 10) / 10,
+        ...sample,
+      }
+    }).filter((view) => view !== undefined)
+    return {
+      windowId: this.win.id,
+      cols: this.config.cols,
+      rows: this.config.rows,
+      activeViews: this.views.size,
+      sampledViews: views.length,
+      views,
+    }
+  }
+
   createView(content?: ViewContent) {
     const { win } = this
     assert(win != null, 'Window must be initialized')
@@ -768,6 +884,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     )
     StreamWindow.registerSender(viewId, this)
     view.webContents.once('destroyed', () => {
+      this.mediaHealth.delete(viewId)
       hlsStartupScheduler.cancel(viewId)
       hlsRequestScheduler.unregisterRenderer(viewId)
       StreamWindow.senderToWindow.delete(viewId)

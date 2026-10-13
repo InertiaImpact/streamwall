@@ -46,6 +46,8 @@ if (!VERBOSE_LOG) {
 
 export interface StreamwallConfig {
   help: boolean
+  /** Enable bounded, local video frame diagnostics for stress testing. */
+  'media-health-log'?: boolean
   /** Skip the first-run config wizard (CLI-only flag) */
   'skip-setup'?: boolean
   /** Legacy camelCase alias for skip-setup */
@@ -138,6 +140,11 @@ function parseArgs(): StreamwallConfig {
       .group(['grid.cols', 'grid.rows'], 'Grid dimensions')
       .option('skip-setup', {
         describe: 'Bypass the setup wizard and launch directly (use existing config/defaults)',
+        boolean: true,
+        default: false,
+      })
+      .option('media-health-log', {
+        describe: 'Write low-rate video frame diagnostics to local app data',
         boolean: true,
         default: false,
       })
@@ -841,6 +848,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
 }
 
 async function main(argv: ReturnType<typeof parseArgs>) {
+  StreamWindow.configureMediaHealth(argv['media-health-log'] === true)
   console.log('[main] starting with grid.count', argv.grid.count, 'instances', argv.grid.instances?.length)
 
   // Clean up any legacy/camelCase/underscored numeric values in config on startup

@@ -140,6 +140,59 @@ async function ensurePlayback(video: HTMLMediaElement, attempts = 3) {
   return false
 }
 
+function startMediaHealthSampling(video: HTMLVideoElement) {
+  let sampledAt = performance.now()
+  let currentTime = video.currentTime
+  let quality = video.getVideoPlaybackQuality?.()
+  let totalFrames = quality?.totalVideoFrames ?? 0
+  let droppedFrames = quality?.droppedVideoFrames ?? 0
+
+  const timer = window.setInterval(() => {
+    try {
+      const now = performance.now()
+      const nextQuality = video.getVideoPlaybackQuality?.()
+      let bufferedAheadSeconds = 0
+      for (let i = 0; i < video.buffered.length; i++) {
+        if (
+          video.buffered.start(i) <= video.currentTime &&
+          video.currentTime <= video.buffered.end(i)
+        ) {
+          bufferedAheadSeconds = video.buffered.end(i) - video.currentTime
+          break
+        }
+      }
+
+      ipcRenderer.send('view-media-health', {
+        elapsedMs: Math.round(now - sampledAt),
+        presentedFrames: nextQuality
+          ? Math.max(0, nextQuality.totalVideoFrames - totalFrames)
+          : null,
+        droppedFrames: nextQuality
+          ? Math.max(0, nextQuality.droppedVideoFrames - droppedFrames)
+          : null,
+        advancedSeconds: Math.max(0, video.currentTime - currentTime),
+        bufferedAheadSeconds,
+        readyState: video.readyState,
+        paused: video.paused,
+        playbackRate: video.playbackRate,
+        width: video.videoWidth,
+        height: video.videoHeight,
+      })
+
+      sampledAt = now
+      currentTime = video.currentTime
+      quality = nextQuality
+      totalFrames = quality?.totalVideoFrames ?? 0
+      droppedFrames = quality?.droppedVideoFrames ?? 0
+    } catch (error) {
+      console.warn('[media health] sample failed', error)
+    }
+  }, 10_000)
+  window.addEventListener('beforeunload', () => window.clearInterval(timer), {
+    once: true,
+  })
+}
+
 const pageReady = new Promise((resolve) =>
   document.addEventListener('DOMContentLoaded', resolve, { once: true }),
 )
@@ -383,7 +436,7 @@ async function main() {
   const viewInit = ipcRenderer.invoke('view-init')
   const pageReady = new Promise((resolve) => process.once('loaded', resolve))
 
-  const [{ content, options: initialOptions }] = await Promise.all([
+  const [{ content, options: initialOptions, mediaHealthEnabled }] = await Promise.all([
     viewInit,
     pageReady,
   ])
@@ -408,6 +461,9 @@ async function main() {
     ) {
       rotationController = new RotationController(video)
       cropController = new CropController(video)
+      if (mediaHealthEnabled) {
+        startMediaHealthSampling(video)
+      }
     }
     ipcRenderer.send('view-info', { info })
   } else if (content.kind === 'web') {

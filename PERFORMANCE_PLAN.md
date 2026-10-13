@@ -39,6 +39,21 @@ and 11% 3D utilization. These snapshots do not establish frame delivery or
 exclude short bursts of saturation; collect per-video frame and buffer data
 before attributing the reported stutter to a specific stage.
 
+After restarting the local app into the opt-in diagnostic package, the 12×12
+grid had 90 active views; 85 video views supplied frame samples. The other
+4×5 grid had seven sampled video views. At 17:20:28 UTC, the first 28 sampled
+videos in the large grid averaged 15.6 fps. From 17:20:58 through 17:25:28
+UTC, 30-second snapshots repeatedly showed large-grid means around 2–4 fps,
+with one temporary rise. During the low-fps periods, sampled videos averaged
+roughly 8–10 seconds buffered and their media clocks advanced roughly 9–10
+seconds per 10-second sample. The small grid slowed at the same time. This
+favors a shared local decode/presentation problem over an origin or request
+admission bottleneck, but does not yet isolate a GPU engine, thread, driver,
+decoder-session limit, or Chromium compositor cause. With 90 active views,
+Streamwall used about 10.5 GB working set and 4.95 CPU cores in one sample;
+the GPU process used 2.4 of those cores. A GPU engine sample showed 53.5%
+video decode and 18.3% 3D utilization.
+
 ## Success criteria and comparison method
 
 Use the same 93-tile layout and a fixed 30-minute camera set for each
@@ -54,10 +69,14 @@ remote comparison is complete.
 ## Phase 1: find the limiting stage
 
 1. Add a lightweight, opt-in media health sample every 10 seconds, aggregated
-   by grid. For each video, report `getVideoPlaybackQuality()` frame deltas,
-   `requestVideoFrameCallback()` presentation cadence when available,
-   dimensions, ready state, buffered seconds, playback rate, and HLS level.
-   Do not send frame-by-frame IPC or retain unlimited per-tile history.
+   by grid. The first implementation uses `getVideoPlaybackQuality()` frame
+   deltas, dimensions, ready state, buffered seconds, playback rate, and media
+   time advancement for video, HLS, and HDHomeRun views. Launch with
+   `--skip-setup=true --media-health-log` to write a rolling, 8 MB
+   `media-health.jsonl` in the Streamwall user data directory. It emits one
+   snapshot every 30 seconds, with no frame-by-frame IPC. Compare a fixed
+   layout against the uninstrumented baseline before enabling callback-based
+   presentation cadence or adding HLS level telemetry.
 2. Extend the existing runtime diagnostics with per-process CPU and memory,
    renderer PID to view mapping, main-process event-loop delay, and
    `app.getGPUFeatureStatus().video_decode`. Capture GPU video-decode engine
