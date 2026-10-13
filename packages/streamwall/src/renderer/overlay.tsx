@@ -122,7 +122,7 @@ function Overlay({
               onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
-              {!isObscured && <BlurCover isBlurred={isBlurred} />}
+              {!isObscured && isBlurred && <BlurCover />}
               {!isObscured && hasTitle && (
                 <StreamTitle
                   position={position}
@@ -356,7 +356,7 @@ const BlurCover = styled.div`
   top: -2px;
   bottom: -2px;
   pointer-events: none;
-  backdrop-filter: ${({ isBlurred }) => (isBlurred ? 'blur(8px)' : 'blur(0)')};
+  backdrop-filter: blur(8px);
 `
 
 const VersionText = styled.div`

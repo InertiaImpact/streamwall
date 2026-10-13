@@ -1,6 +1,7 @@
 # Large-grid playback performance plan
 
-Status: planned. The remote machine has not been changed by this plan.
+Status: local baseline captured; the remote machine has not been changed by
+this plan.
 
 ## Observed baseline (2026-10-13)
 
@@ -24,6 +25,19 @@ transmux workers are currently disabled because each tile already owns a
 renderer. The configured Chromium renderer process limit is 16, but the
 remote app reports 82 renderer processes; verify its actual effect before
 changing that switch.
+
+### Local 12×12 stress window (2026-10-13)
+
+The local `2.4.4-bs` app had 61 assigned views in the 12×12 grid and seven in
+another grid when sampled. A 12×12 layout defines capacity; this run did not
+yet exercise 144 playing streams. Windows reported 75 renderer processes and
+about 9.8 GB total Streamwall working set, including about 1.0 GB in the GPU
+process. The machine had 24.6 GB free of 63.7 GB physical memory. A corrected
+10-second CPU sample showed about 3.1 CPU cores used by Streamwall, 1.8 of
+them in the GPU process. One GPU engine sample showed about 43% video decode
+and 11% 3D utilization. These snapshots do not establish frame delivery or
+exclude short bursts of saturation; collect per-video frame and buffer data
+before attributing the reported stutter to a specific stage.
 
 ## Success criteria and comparison method
 
@@ -57,7 +71,9 @@ remote comparison is complete.
 ## Phase 2: low-risk renderer and overlay reductions
 
 1. Stop creating a full-tile `backdrop-filter: blur(0)` layer for every
-   unblurred stream. Profile removal of decorative label blur on a 7x7 grid.
+   unblurred stream. This code change is prepared on `performance-updates` for
+   comparison against the running `2.4.4-bs` baseline. Profile removal of
+   decorative label blur separately on the same grid.
 2. Send the overlay only the grid/view and label data it needs. Avoid
    repeatedly serializing all ~694 stream definitions to every grid after
    individual view state changes. Coalesce state updates to a bounded rate
