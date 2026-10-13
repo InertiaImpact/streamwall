@@ -56,7 +56,10 @@ function distanceKm(a: StreamData, b: StreamData) {
 }
 
 function eligible(stream: StreamData) {
-  return (stream.kind === 'video' || stream.kind === 'hdhomerun') &&
+  // A missing kind is a video everywhere else in Streamwall, including the
+  // view created from streams.toml. Apply the same default to recovery.
+  const kind = stream.kind || 'video'
+  return (kind === 'video' || kind === 'hdhomerun') &&
     /^https?:\/\//i.test(stream.link) && coordinates(stream) !== null
 }
 
