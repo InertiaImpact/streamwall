@@ -639,6 +639,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
   const initialData = {
     host: initialHost,
     port: initialPort,
+    softwareVideoDecode: currentConfig.performance?.['software-video-decode'] ?? false,
     gridCount: initialGridCount,
     grids: instances.map((g, idx) => ({
       id: g.id ?? `grid-${idx + 1}`,
@@ -707,6 +708,10 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
             height: primaryHeight,
             frameless: !!primaryFrameless,
             grids: undefined,
+          },
+          performance: {
+            ...currentConfig.performance,
+            'software-video-decode': payload.softwareVideoDecode === true,
           },
         }
 
@@ -795,6 +800,11 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
             <label>Control port <input id="port" type="number" min="1" max="65535" value="${initialData.port}" /></label>
             <label>Grid count <input id="gridCount" type="number" min="1" max="6" value="${initialData.gridCount}" /></label>
           </div>
+          <fieldset>
+            <legend>Performance</legend>
+            <label><input id="softwareVideoDecode" type="checkbox" ${initialData.softwareVideoDecode ? 'checked' : ''} /> Decode video in software (uses more CPU; can improve large-grid playback)</label>
+            <small>Applied when Streamwall launches. Leave off to use hardware video decoding.</small>
+          </fieldset>
           <div id="grids">${formRows}</div>
           <button id="toggleGrids">Show all grids</button>
           <div class="actions">
@@ -827,6 +837,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
               return {
                 host: document.getElementById('host').value || '0.0.0.0',
                 port: Number(document.getElementById('port').value) || ${initialPort},
+                softwareVideoDecode: document.getElementById('softwareVideoDecode').checked,
                 gridCount: Number(document.getElementById('gridCount').value) || ${initialGridCount},
                 grids,
                 launch,
