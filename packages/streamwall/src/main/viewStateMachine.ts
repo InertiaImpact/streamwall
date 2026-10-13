@@ -1,20 +1,40 @@
 import assert from 'assert'
+import { Buffer } from 'buffer'
 import {
+  app,
   BrowserWindow,
   Rectangle,
   WebContents,
   WebContentsView,
 } from 'electron'
 import { isEqual } from 'lodash-es'
+import path from 'path'
 import { ViewContent, ViewPos } from 'streamwall-shared'
-import { Buffer } from 'buffer'
 import {
   ContentDisplayOptions,
   ContentViewInfo,
 } from 'streamwall-shared/src/types'
 import { Actor, assign, fromPromise, setup } from 'xstate'
 import { ensureValidURL } from '../util'
+import { HdHomeRunBridge, isHdHomeRunURL } from './hdHomeRun'
+import { hlsStartupScheduler } from './hlsStartupScheduler'
 import { loadHTML } from './loadHTML'
+
+const hdHomeRunBridge = new HdHomeRunBridge(
+  app.isPackaged && process.platform === 'win32'
+    ? path.join(process.resourcesPath, 'ffmpeg.exe')
+    : 'ffmpeg',
+)
+app.once('before-quit', () => hdHomeRunBridge.close())
+const registeredHdHomeRunViews = new WeakSet<WebContents>()
+
+function isHlsURL(url: string) {
+  try {
+    return /\.m3u8?$/i.test(new URL(url).pathname)
+  } catch {
+    return /\.m3u8?(?:$|[?#])/i.test(url)
+  }
+}
 
 const viewStateMachine = setup({
   types: {
@@ -56,8 +76,15 @@ const viewStateMachine = setup({
   },
 
   actions: {
-    logError: (_, params: { error: unknown }) => {
+    logError: ({ context }, params: { error: unknown }) => {
       console.warn(params.error)
+      if (
+        context.content &&
+        (context.content.kind === 'hdhomerun' ||
+          isHdHomeRunURL(context.content.url))
+      ) {
+        hdHomeRunBridge.release(context.view.webContents.id)
+      }
     },
 
     muteAudio: ({ context }) => {
@@ -146,12 +173,14 @@ const viewStateMachine = setup({
     loadPage: fromPromise(
       async ({
         input: { content, view, options },
+        signal,
       }: {
         input: {
           content: ViewContent | null
           view: WebContentsView
           options: ContentDisplayOptions | null
         }
+        signal: AbortSignal
       }) => {
         assert(content !== null)
 
@@ -159,12 +188,58 @@ const viewStateMachine = setup({
         const wc = view.webContents
         wc.audioMuted = true
 
-        if (/\.m3u8?$/.test(content.url)) {
-              const query: Record<string, string> = { src: content.url }
-              if (options?.crop) {
-                query.crop = Buffer.from(JSON.stringify(options.crop)).toString('base64')
-              }
-              loadHTML(wc, 'playHLS', { query })
+        const useHdHomeRun =
+          content.kind === 'hdhomerun' || isHdHomeRunURL(content.url)
+        let playbackURL = content.url
+        let navigationSubmitted = false
+        if (useHdHomeRun) {
+          const release = () => hdHomeRunBridge.release(wc.id)
+          signal.addEventListener(
+            'abort',
+            () => {
+              if (!navigationSubmitted) release()
+            },
+            { once: true },
+          )
+          if (!registeredHdHomeRunViews.has(wc)) {
+            registeredHdHomeRunViews.add(wc)
+            wc.once('destroyed', release)
+          }
+          playbackURL = await hdHomeRunBridge.acquire(content.url, wc.id)
+          if (signal.aborted || wc.isDestroyed()) {
+            release()
+            return
+          }
+        }
+
+        if (useHdHomeRun || isHlsURL(content.url)) {
+          const admission = await hlsStartupScheduler.waitForStart(
+            wc.id,
+            signal,
+          )
+          if (signal.aborted || wc.isDestroyed()) {
+            hlsStartupScheduler.release(wc.id)
+            return
+          }
+
+          const query: Record<string, string> = {
+            src: playbackURL,
+            activeStartups: String(admission.activeStartups),
+            queuedStartups: String(admission.queuedStartups),
+            queueWaitMs: String(admission.queueWaitMs),
+          }
+          if (options?.crop) {
+            query.crop = Buffer.from(JSON.stringify(options.crop)).toString(
+              'base64',
+            )
+          }
+          try {
+            loadHTML(wc, 'playHLS', { query })
+            navigationSubmitted = true
+          } catch (error) {
+            hlsStartupScheduler.release(wc.id)
+            throw error
+          }
         } else {
           wc.loadURL(content.url)
         }

@@ -22,7 +22,10 @@ function useStreamwallWebsocketConnection(
   const wsRef = useRef<{
     ws: ReconnectingWebSocket
     msgId: number
-    responseMap: Map<number, (msg: object) => void>
+    responseMap: Map<
+      number,
+      { callback: (msg: object) => void; timeout: number }
+    >
   }>()
   const [isConnected, setIsConnected] = useState(false)
   const {
@@ -74,10 +77,11 @@ function useStreamwallWebsocketConnection(
       const msg = JSON.parse(ev.data)
       if (msg.response && wsRef.current != null) {
         const { responseMap } = wsRef.current
-        const responseCb = responseMap.get(msg.id)
-        if (responseCb) {
+        const pendingResponse = responseMap.get(msg.id)
+        if (pendingResponse) {
           responseMap.delete(msg.id)
-          responseCb(msg)
+          window.clearTimeout(pendingResponse.timeout)
+          pendingResponse.callback(msg)
         }
       } else if (msg.type === 'state' || msg.type === 'state-delta') {
         let state: StreamwallState
@@ -151,7 +155,11 @@ function useStreamwallWebsocketConnection(
         }),
       )
       if (cb) {
-        responseMap.set(msgId, cb)
+        const timeout = window.setTimeout(() => {
+          responseMap.delete(msgId)
+          cb({ error: 'request timed out' })
+        }, 10_000)
+        responseMap.set(msgId, { callback: cb, timeout })
       }
       wsRef.current.msgId++
     },
@@ -164,6 +172,10 @@ function useStreamwallWebsocketConnection(
     }
     // Connection establishment and teardown is handled by ReconnectingWebSocket
     return () => {
+      for (const pendingResponse of wsRef.current?.responseMap.values() ?? []) {
+        window.clearTimeout(pendingResponse.timeout)
+      }
+      wsRef.current?.responseMap.clear()
       // Cleanup if needed
     }
   }, [])

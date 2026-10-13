@@ -1,14 +1,20 @@
 import TOML from '@iarna/toml'
 import * as Sentry from '@sentry/electron/main'
-import { BrowserWindow, app, session, shell } from 'electron'
+import { BrowserWindow, app, dialog, ipcMain, session, shell } from 'electron'
+import runControlServer from 'streamwall-control-server'
 import started from 'electron-squirrel-startup'
 import fs from 'fs'
 import { throttle } from 'lodash-es'
 import EventEmitter from 'node:events'
-import { join } from 'node:path'
+import { join, isAbsolute, dirname } from 'node:path'
 import ReconnectingWebSocket from 'reconnecting-websocket'
 import 'source-map-support/register'
-import { ControlCommand, StreamwallState } from 'streamwall-shared'
+import {
+  ControlCommand,
+  ControlResponseMessage,
+  StreamwallState,
+  ViewState,
+} from 'streamwall-shared'
 import { updateElectronApp } from 'update-electron-app'
 import WebSocket from 'ws'
 import yargs from 'yargs'
@@ -24,6 +30,7 @@ import {
   watchDataFile,
 } from './data'
 import { loadStorage } from './storage'
+import { applyStreamwallRuntimeTuning } from './runtimeTuning'
 import StreamdelayClient from './StreamdelayClient'
 import StreamWindow from './StreamWindow'
 import TwitchBot from './TwitchBot'
@@ -31,11 +38,31 @@ import TwitchBot from './TwitchBot'
 const SENTRY_DSN =
   'https://e630a21dcf854d1a9eb2a7a8584cbd0b@o459879.ingest.sentry.io/5459505'
 
+// Reduce noisy logs unless explicitly enabled
+const VERBOSE_LOG = process.env.STREAMWALL_VERBOSE === '1'
+if (!VERBOSE_LOG) {
+  console.debug = () => {}
+}
+
 export interface StreamwallConfig {
   help: boolean
+  /** Skip the first-run config wizard (CLI-only flag) */
+  'skip-setup'?: boolean
+  /** Legacy camelCase alias for skip-setup */
+  skipSetup?: boolean
+  maintenance?: {
+    'refresh-all'?: {
+      enabled?: boolean
+      time?: string // HH:mm local time
+    }
+  }
   grid: {
     cols: number
     rows: number
+    count: number
+    positions?: Array<{ x?: number; y?: number }>
+    window?: Array<{ x?: number; y?: number }>
+    instances?: Array<{ id?: string; index?: number; cols?: number; rows?: number; x?: number; y?: number; width?: number; height?: number; frameless?: boolean; fullscreen?: boolean }>
   }
   window: {
     x?: number
@@ -43,8 +70,10 @@ export interface StreamwallConfig {
     width: number
     height: number
     frameless: boolean
+    fullscreen?: boolean
     'background-color': string
     'active-color': string
+    grids?: Array<{ id?: string; index?: number; x?: number; y?: number }>
   }
   data: {
     interval: number
@@ -107,6 +136,16 @@ function parseArgs(): StreamwallConfig {
         return TOML.parse(fs.readFileSync(configPath, 'utf-8'))
       })
       .group(['grid.cols', 'grid.rows'], 'Grid dimensions')
+      .option('skip-setup', {
+        describe: 'Bypass the setup wizard and launch directly (use existing config/defaults)',
+        boolean: true,
+        default: false,
+      })
+      .option('grid.count', {
+        describe: 'Number of independent output grids/windows',
+        number: true,
+        default: 2,
+      })
       .option('grid.cols', {
         number: true,
         default: 3,
@@ -122,6 +161,7 @@ function parseArgs(): StreamwallConfig {
           'window.x',
           'window.y',
           'window.frameless',
+          'window.fullscreen',
           'window.background-color',
           'window.active-color',
         ],
@@ -142,6 +182,10 @@ function parseArgs(): StreamwallConfig {
         default: 1080,
       })
       .option('window.frameless', {
+        boolean: true,
+        default: false,
+      })
+      .option('window.fullscreen', {
         boolean: true,
         default: false,
       })
@@ -210,6 +254,16 @@ function parseArgs(): StreamwallConfig {
         describe: 'Port for control server',
         number: true,
         default: 3000,
+      })
+      .option('control.token-id', {
+        describe:
+          'Optional override for the streamwall token id (use when connecting to an external control server)',
+        default: null,
+      })
+      .option('control.token-secret', {
+        describe:
+          'Optional override for the streamwall token secret (use when connecting to an external control server)',
+        default: null,
       })
       .option('control.username', {
         describe: 'Control server admin username',
@@ -284,13 +338,513 @@ function parseArgs(): StreamwallConfig {
         boolean: true,
         default: true,
       })
+      .group(['maintenance.refresh-all.enabled', 'maintenance.refresh-all.time'], 'Maintenance')
+      .option('maintenance.refresh-all.enabled', {
+        describe: 'Automatically refresh all views sequentially at a scheduled time',
+        boolean: true,
+        default: false,
+      })
+      .option('maintenance.refresh-all.time', {
+        describe: 'Local time (HH:mm) to refresh all views sequentially',
+        string: true,
+        default: '02:00',
+      })
       .help()
       // https://github.com/yargs/yargs/issues/2137
       .parseSync(process.argv) as unknown as StreamwallConfig
   )
 }
 
+type GridInstanceConfig = {
+  id?: string
+  index?: number
+  cols?: number
+  rows?: number
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+   frameless?: boolean
+   fullscreen?: boolean
+}
+
+function deriveGridInstances(cfg: StreamwallConfig): GridInstanceConfig[] {
+  if (cfg.grid.instances && cfg.grid.instances.length > 0) {
+    return cfg.grid.instances
+  }
+
+  const defaultCols = cfg.grid.cols
+  const defaultRows = cfg.grid.rows
+  const fallbackPositions = [
+    { x: 0, y: 0 },
+    { x: 1920, y: 0 },
+    { x: 0, y: 1080 },
+    { x: 1920, y: 1080 },
+    { x: 0, y: 2160 },
+    { x: 1920, y: 2160 },
+  ]
+
+  const fromWindowGrids = cfg.window.grids?.map((g, idx) => ({
+    id: g.id ?? `grid-${g.index ?? idx + 1}`,
+    index: g.index ?? idx + 1,
+    cols: defaultCols,
+    rows: defaultRows,
+    x: g.x,
+    y: g.y,
+    frameless: cfg.window.frameless,
+    fullscreen: cfg.window.fullscreen,
+  }))
+
+  const fromGridWindow = cfg.grid.window?.map((pos, idx) => ({
+    id: `grid-${idx + 1}`,
+    index: idx + 1,
+    cols: defaultCols,
+    rows: defaultRows,
+    x: pos.x,
+    y: pos.y,
+    width: cfg.window.width,
+    height: cfg.window.height,
+    frameless: cfg.window.frameless,
+    fullscreen: cfg.window.fullscreen,
+  }))
+
+  const candidates = fromWindowGrids?.length ? fromWindowGrids : fromGridWindow ?? []
+  const count = Math.max(cfg.grid.count ?? candidates.length, candidates.length)
+
+  const instances: GridInstanceConfig[] = []
+  for (let i = 0; i < Math.max(count, fallbackPositions.length); i++) {
+    const candidate = candidates[i]
+    const pos = candidate?.x !== undefined || candidate?.y !== undefined ? candidate : { x: fallbackPositions[i]?.x, y: fallbackPositions[i]?.y }
+    instances.push({
+      id: candidate?.id ?? `grid-${i + 1}`,
+      index: candidate?.index ?? i + 1,
+      cols: candidate?.cols ?? defaultCols,
+      rows: candidate?.rows ?? defaultRows,
+      x: pos?.x,
+      y: pos?.y,
+      width: candidate?.width ?? cfg.window.width,
+      height: candidate?.height ?? cfg.window.height,
+      frameless: candidate?.frameless ?? cfg.window.frameless,
+      fullscreen: candidate?.fullscreen ?? cfg.window.fullscreen,
+    })
+  }
+
+  return instances
+}
+
+function pruneUndefined<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => pruneUndefined(item))
+      .filter((item) => item !== undefined) as unknown as T
+  }
+  if (value && typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      const cleaned = pruneUndefined(val)
+      if (cleaned !== undefined) {
+        result[key] = cleaned
+      }
+    }
+    return result as unknown as T
+  }
+  return value
+}
+
+function normalizeNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value.replace(/_/g, ''))
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+function normalizeBoolean(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined
+  return !!value
+}
+
+function canonicalizeConfigForSave(config: StreamwallConfig) {
+  const skipSetup = (config as any)['skip-setup'] ?? (config as any).skipSetup
+  const refreshAll = config.maintenance?.['refresh-all'] ?? (config as any).maintenance?.refreshAll
+
+  const gridInstances = config.grid.instances?.map((g) =>
+    pruneUndefined({
+      id: g.id,
+      index: normalizeNumber(g.index),
+      cols: normalizeNumber(g.cols),
+      rows: normalizeNumber(g.rows),
+      x: normalizeNumber(g.x),
+      y: normalizeNumber(g.y),
+      width: normalizeNumber(g.width),
+      height: normalizeNumber(g.height),
+      frameless: normalizeBoolean(g.frameless),
+      fullscreen: normalizeBoolean(g.fullscreen),
+    }),
+  )
+
+  const windowGrids = config.window.grids?.map((g) =>
+    pruneUndefined({
+      id: g.id,
+      index: normalizeNumber(g.index),
+      x: normalizeNumber(g.x),
+      y: normalizeNumber(g.y),
+    }),
+  )
+
+  const dataSection = (config.data as any) ?? {}
+  const controlSection = (config.control as any) ?? {}
+  const twitchSection = (config.twitch as any) ?? {}
+
+  return pruneUndefined({
+    'skip-setup': normalizeBoolean(skipSetup),
+    maintenance: refreshAll
+      ? {
+          'refresh-all': {
+            enabled: normalizeBoolean(refreshAll.enabled) ?? false,
+            time: refreshAll.time ?? '02:00',
+          },
+        }
+      : undefined,
+    grid: {
+      cols: normalizeNumber(config.grid.cols),
+      rows: normalizeNumber(config.grid.rows),
+      count: normalizeNumber(config.grid.count),
+      positions: config.grid.positions?.map((p) =>
+        pruneUndefined({ x: normalizeNumber(p.x), y: normalizeNumber(p.y) }),
+      ),
+      window: (config.grid as any).window?.map((p: any) =>
+        pruneUndefined({ x: normalizeNumber(p.x), y: normalizeNumber(p.y) }),
+      ),
+      instances: gridInstances,
+    },
+    window: {
+      x: normalizeNumber(config.window.x),
+      y: normalizeNumber(config.window.y),
+      width: normalizeNumber(config.window.width),
+      height: normalizeNumber(config.window.height),
+      frameless: normalizeBoolean(config.window.frameless),
+      fullscreen: normalizeBoolean(config.window.fullscreen),
+      'background-color': (config.window as any)['background-color'] ?? (config.window as any).backgroundColor,
+      'active-color': (config.window as any)['active-color'] ?? (config.window as any).activeColor,
+      grids: windowGrids,
+    },
+    data: {
+      interval: normalizeNumber(config.data.interval),
+      'json-url': dataSection['json-url'] ?? dataSection.jsonUrl ?? [],
+      'toml-file': dataSection['toml-file'] ?? dataSection.tomlFile ?? [],
+    },
+    streamdelay: {
+      endpoint: (config.streamdelay as any)?.endpoint,
+      key: (config.streamdelay as any)?.key ?? null,
+    },
+    control: {
+      endpoint: controlSection.endpoint ?? null,
+      'auto-start-server': normalizeBoolean(
+        controlSection['auto-start-server'] ?? controlSection.autoStartServer,
+      ),
+      enabled: normalizeBoolean(controlSection.enabled),
+      address: controlSection.address,
+      token: controlSection.token,
+      hostname: controlSection.hostname,
+      port: normalizeNumber(controlSection.port),
+      username: controlSection.username,
+      password: controlSection.password,
+    },
+    twitch: {
+      channel: twitchSection.channel ?? null,
+      username: twitchSection.username ?? null,
+      token: twitchSection.token ?? null,
+      color: twitchSection.color,
+      announce: twitchSection.announce
+        ? {
+            template: twitchSection.announce.template,
+            interval: normalizeNumber(twitchSection.announce.interval),
+            delay: normalizeNumber(twitchSection.announce.delay),
+          }
+        : undefined,
+      vote: twitchSection.vote
+        ? {
+            template: twitchSection.vote.template,
+            interval: normalizeNumber(twitchSection.vote.interval),
+          }
+        : undefined,
+    },
+    telemetry: {
+      sentry: normalizeBoolean((config.telemetry as any)?.sentry),
+    },
+  })
+}
+
+function stringifyCanonicalConfig(config: StreamwallConfig) {
+  const serializableConfig = canonicalizeConfigForSave(config)
+  const rawToml = TOML.stringify(serializableConfig as any)
+  // Strip numeric underscores that @iarna/toml emits for readability
+  return rawToml.replace(/\b\d[\d_]*\b/g, (num) => num.replace(/_/g, ''))
+}
+
+function persistCanonicalConfigIfPresent(config: StreamwallConfig) {
+  const configPath = join(app.getPath('userData'), 'config.toml')
+  if (!fs.existsSync(configPath)) {
+    return
+  }
+
+  try {
+    fs.writeFileSync(configPath, stringifyCanonicalConfig(config))
+    console.debug('[config] canonicalized and saved to', configPath)
+  } catch (err) {
+    console.warn('[config] failed to canonicalize config', err)
+  }
+}
+
+async function openConfigWizard(currentConfig: StreamwallConfig) {
+  const configPath = join(app.getPath('userData'), 'config.toml')
+
+  const url = (() => {
+    try {
+      return new URL(currentConfig.control.address)
+    } catch {
+      return new URL('http://0.0.0.0:3000')
+    }
+  })()
+
+  const initialHost = url.hostname || '0.0.0.0'
+  const initialPort = Number(url.port || currentConfig.control.port || 3000)
+  const instances = deriveGridInstances(currentConfig).slice(0, 6)
+  const initialGridCount = Math.min(Math.max(currentConfig.grid.count ?? instances.length ?? 1, 1), 6)
+
+  const initialData = {
+    host: initialHost,
+    port: initialPort,
+    gridCount: initialGridCount,
+    grids: instances.map((g, idx) => ({
+      id: g.id ?? `grid-${idx + 1}`,
+      cols: g.cols ?? currentConfig.grid.cols,
+      rows: g.rows ?? currentConfig.grid.rows,
+      x: g.x ?? 0,
+      y: g.y ?? 0,
+      width: g.width ?? currentConfig.window.width,
+      height: g.height ?? currentConfig.window.height,
+      frameless: g.frameless ?? currentConfig.window.frameless ?? false,
+    })),
+  }
+
+  return await new Promise<{ launch: boolean } | null>((resolve) => {
+    const win = new BrowserWindow({
+      width: 640,
+      height: 900,
+      resizable: true,
+      title: 'Streamwall Setup',
+      webPreferences: {
+        nodeIntegration: true,
+        contextIsolation: false,
+        sandbox: false,
+      },
+    })
+
+    const channel = 'config-wizard:save'
+
+    ipcMain.handle(channel, (_event, payload) => {
+      console.log('[wizard] Received save request', payload)
+      try {
+        const gridDefaults = { cols: currentConfig.grid.cols, rows: currentConfig.grid.rows }
+        const primaryWidth = Number(payload.grids?.[0]?.width) || currentConfig.window.width
+        const primaryHeight = Number(payload.grids?.[0]?.height) || currentConfig.window.height
+        const primaryFrameless = payload.grids?.[0]?.frameless ?? currentConfig.window.frameless
+        const nextConfig: StreamwallConfig = {
+          ...currentConfig,
+          control: {
+            ...currentConfig.control,
+            hostname: payload.host || initialHost,
+            port: Number(payload.port) || initialPort,
+            address: `http://${payload.host || initialHost}:${Number(payload.port) || initialPort}`,
+          },
+          grid: {
+            ...currentConfig.grid,
+            positions: undefined,
+            window: undefined,
+            instances: payload.grids.slice(0, 6).map((g: any, idx: number) => ({
+              id: g.id || `grid-${idx + 1}`,
+              index: idx + 1,
+              cols: Number(g.cols) || gridDefaults.cols,
+              rows: Number(g.rows) || gridDefaults.rows,
+              x: g.x === '' || g.x === undefined ? undefined : Number(g.x),
+              y: g.y === '' || g.y === undefined ? undefined : Number(g.y),
+              width: Number(g.width) || primaryWidth,
+              height: Number(g.height) || primaryHeight,
+              frameless: !!g.frameless,
+            })),
+            cols: Number(payload.grids?.[0]?.cols) || currentConfig.grid.cols,
+            rows: Number(payload.grids?.[0]?.rows) || currentConfig.grid.rows,
+            count: Number(payload.gridCount) || initialGridCount,
+          },
+          window: {
+            ...currentConfig.window,
+            width: primaryWidth,
+            height: primaryHeight,
+            frameless: !!primaryFrameless,
+            grids: undefined,
+          },
+        }
+
+        const cleanedConfig: StreamwallConfig = {
+          ...nextConfig,
+          grid: { ...nextConfig.grid },
+          window: { ...nextConfig.window },
+        }
+        delete (cleanedConfig.grid as any).window
+        delete (cleanedConfig.grid as any).positions
+        delete (cleanedConfig.window as any).grids
+
+        fs.writeFileSync(configPath, stringifyCanonicalConfig(cleanedConfig))
+        console.log('[wizard] Saved config to', configPath)
+        resolve({ launch: !!payload.launch })
+      } catch (err) {
+        console.error('Failed to save config:', err)
+        resolve(null)
+      } finally {
+        ipcMain.removeHandler(channel)
+        win.close()
+      }
+    })
+
+    win.on('closed', () => {
+      ipcMain.removeHandler(channel)
+      resolve(null)
+    })
+
+    const formRows = Array.from({ length: 6 }, (_, idx) => {
+      const g = initialData.grids[idx] ?? {
+        id: `grid-${idx + 1}`,
+        cols: currentConfig.grid.cols,
+        rows: currentConfig.grid.rows,
+        x: 0,
+        y: 0,
+        width: currentConfig.window.width,
+        height: currentConfig.window.height,
+        frameless: currentConfig.window.frameless ?? false,
+      }
+      const hiddenClass = idx >= 2 ? 'class="grid-row hidden"' : 'class="grid-row"'
+      return `
+        <fieldset ${hiddenClass} data-idx="${idx}" style="margin-bottom:12px; border:1px solid #ccc; padding:10px;">
+          <legend style="padding:0 6px;">Grid ${idx + 1}</legend>
+          <label>ID <input name="id-${idx}" value="${g.id}" /></label>
+          <label>Cols <input type="number" min="1" name="cols-${idx}" value="${g.cols}" /></label>
+          <label>Rows <input type="number" min="1" name="rows-${idx}" value="${g.rows}" /></label>
+          <label>X <input type="number" name="x-${idx}" value="${g.x}" /></label>
+          <label>Y <input type="number" name="y-${idx}" value="${g.y}" /></label>
+          <label>Width <input type="number" min="200" name="width-${idx}" value="${g.width}" /></label>
+          <label>Height <input type="number" min="200" name="height-${idx}" value="${g.height}" /></label>
+          <label><input type="checkbox" name="frameless-${idx}" ${g.frameless ? 'checked' : ''} /> Borderless window</label>
+        </fieldset>
+      `
+    }).join('')
+
+    const html = `
+      <!doctype html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <title>Streamwall Setup</title>
+          <style>
+            body { font-family: sans-serif; margin: 16px; }
+            label { display: block; margin: 4px 0; }
+            input { margin-left: 6px; }
+            .row { display: flex; gap: 12px; flex-wrap: wrap; }
+            fieldset label { display: flex; gap: 6px; align-items: center; }
+            .actions { margin-top: 12px; display: flex; gap: 8px; }
+            .hidden { display: none; }
+            #toggleGrids { margin: 8px 0; }
+            .btn { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; color: #fff; }
+            .btn svg { width: 16px; height: 16px; }
+            .btn.start { background: #2ecc71; box-shadow: 0 2px 0 #27ae60; }
+            .btn.start:hover { background: #27ae60; }
+            .btn.save { background: #3498db; box-shadow: 0 2px 0 #2c80b8; }
+            .btn.save:hover { background: #2c80b8; }
+            .btn.cancel { background: #666; box-shadow: 0 2px 0 #444; }
+            .btn.cancel:hover { background: #555; }
+          </style>
+        </head>
+        <body>
+          <h2>Streamwall Setup</h2>
+          <div class="row">
+            <label>Control host <input id="host" value="${initialData.host}" /></label>
+            <label>Control port <input id="port" type="number" min="1" max="65535" value="${initialData.port}" /></label>
+            <label>Grid count <input id="gridCount" type="number" min="1" max="6" value="${initialData.gridCount}" /></label>
+          </div>
+          <div id="grids">${formRows}</div>
+          <button id="toggleGrids">Show all grids</button>
+          <div class="actions">
+            <button id="saveLaunch" class="btn start" title="Save and launch">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+              <span>Save & Launch</span>
+            </button>
+            <button id="save" class="btn save" title="Save only">
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6 2h11l3 3v15a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm0 2v16h13V7h-4a1 1 0 0 1-1-1V4H6zm9 0v2h2.586L15 4.414V4zM8 12h8v2H8v-2zm0 4h8v2H8v-2z"/></svg>
+              <span>Save Only</span>
+            </button>
+            <button id="cancel" class="btn cancel" title="Cancel and exit">Cancel</button>
+          </div>
+          <script>
+            const { ipcRenderer } = require('electron')
+            const channel = '${channel}'
+            function collectPayload(launch) {
+              const grids = []
+              for (let i = 0; i < 6; i++) {
+                const id = document.querySelector('[name="id-' + i + '"]').value || ('grid-' + (i+1))
+                const cols = document.querySelector('[name="cols-' + i + '"]').value
+                const rows = document.querySelector('[name="rows-' + i + '"]').value
+                const x = document.querySelector('[name="x-' + i + '"]').value
+                const y = document.querySelector('[name="y-' + i + '"]').value
+                const width = document.querySelector('[name="width-' + i + '"]').value
+                const height = document.querySelector('[name="height-' + i + '"]').value
+                const frameless = document.querySelector('[name="frameless-' + i + '"]').checked
+                grids.push({ id, cols, rows, x, y, width, height, frameless })
+              }
+              return {
+                host: document.getElementById('host').value || '0.0.0.0',
+                port: Number(document.getElementById('port').value) || ${initialPort},
+                gridCount: Number(document.getElementById('gridCount').value) || ${initialGridCount},
+                grids,
+                launch,
+              }
+            }
+            const handleSave = (launch) => {
+              ipcRenderer.invoke(channel, collectPayload(launch)).catch((err) => {
+                console.error('Failed to save config:', err)
+                alert('Failed to save config. Check the console for details.')
+              })
+            }
+            document.getElementById('saveLaunch').onclick = () => handleSave(true)
+            document.getElementById('save').onclick = () => handleSave(false)
+            document.getElementById('cancel').onclick = () => window.close()
+
+            const toggleBtn = document.getElementById('toggleGrids')
+            let expanded = false
+            toggleBtn.onclick = () => {
+              expanded = !expanded
+              document.querySelectorAll('.grid-row').forEach((el, idx) => {
+                if (idx < 2) return
+                el.classList.toggle('hidden', !expanded)
+              })
+              toggleBtn.textContent = expanded ? 'Hide extra grids' : 'Show all grids'
+            }
+          </script>
+        </body>
+      </html>
+    `
+
+    win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html))
+  })
+}
+
 async function main(argv: ReturnType<typeof parseArgs>) {
+  console.log('[main] starting with grid.count', argv.grid.count, 'instances', argv.grid.instances?.length)
+
+  // Clean up any legacy/camelCase/underscored numeric values in config on startup
+  persistCanonicalConfigIfPresent(argv)
   // Reject all permission requests from web content.
   session
     .fromPartition('persist:session')
@@ -298,29 +852,116 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       callback(false)
     })
 
+  // Prefer bundled storage (tokens) when available; copy to userData so it is writable
+  const userStoragePath = join(app.getPath('userData'), 'streamwall-storage.json')
+  const storageCandidates = [
+    join(app.getAppPath(), 'storage.json'),
+    join(process.resourcesPath, 'storage.json'),
+    join(process.resourcesPath, 'app', 'storage.json'),
+    join(process.resourcesPath, '..', 'storage.json'),
+  ]
+  const bundledStoragePath = storageCandidates.find((p) => p && fs.existsSync(p))
+  if (bundledStoragePath && !fs.existsSync(userStoragePath)) {
+    try {
+      fs.copyFileSync(bundledStoragePath, userStoragePath)
+      console.log('Copied bundled storage to', userStoragePath)
+    } catch (err) {
+      console.warn('Failed to copy bundled storage; continuing with bundled path', err)
+    }
+  }
+  const storagePath = fs.existsSync(userStoragePath)
+    ? userStoragePath
+    : bundledStoragePath ?? userStoragePath
+
+  const db = await loadStorage(storagePath)
+
+  const configuredToken = (() => {
+    const explicitId = argv.control['token-id'] as string | null
+    const explicitSecret = argv.control['token-secret'] as string | null
+
+    if (explicitId && explicitSecret) {
+      return { tokenId: explicitId, secret: explicitSecret }
+    }
+
+    const combined = argv.control.token as string | null
+    if (combined && combined.includes(':')) {
+      const [tokenId, secret] = combined.split(':', 2)
+      if (tokenId && secret) {
+        return { tokenId, secret }
+      }
+    }
+
+    return (db.data as any).streamwallToken as
+      | { tokenId: string; secret: string }
+      | undefined
+  })()
+
   // Start control server if auto-start is enabled
   if (argv.control.enabled && argv.control['auto-start-server']) {
     console.log('Auto-starting control server...')
     try {
-      // In dev we can use the workspace dist; in prod use extraResource path
-      const clientStaticPath = (typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined' && MAIN_WINDOW_VITE_DEV_SERVER_URL)
-        ? join(__dirname, '../../streamwall-control-client/dist')
-        : join(process.resourcesPath, 'control-client')
+      // Ensure control server shares the same storage (tokens) as the app
+      process.env.DB_PATH = storagePath
+
+      // If a token override was provided, persist it so the control server and client match
+      if (
+        configuredToken &&
+        JSON.stringify(db.data.streamwallToken) !== JSON.stringify(configuredToken)
+      ) {
+        db.update((data) => {
+          data.streamwallToken = configuredToken
+        })
+      }
+
+      // Resolve control UI static assets with fallbacks for dev and packaged builds
+      const staticCandidates = [
+        process.env.STREAMWALL_CONTROL_STATIC,
+        // Prefer workspace build output if it exists
+        join(process.cwd(), 'packages/streamwall-control-client/dist'),
+        // Fallbacks for packaged app locations
+        typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined' && MAIN_WINDOW_VITE_DEV_SERVER_URL
+          ? join(process.cwd(), 'packages/streamwall-control-client/dist')
+          : null,
+        // Packed as extraResource -> resources/dist
+        join(app.getAppPath(), '../dist'),
+        join(process.resourcesPath, 'dist'),
+        // If we later change extraResource to keep parent folder
+        join(app.getAppPath(), '../streamwall-control-client/dist'),
+        join(process.resourcesPath, 'streamwall-control-client', 'dist'),
+        join(process.resourcesPath, 'control-client'),
+      ].filter(Boolean) as string[]
+
+      const clientStaticPath = staticCandidates.find((p) => fs.existsSync(p))
+
+      if (!clientStaticPath) {
+        throw new Error('Unable to locate control client static assets')
+      }
+
+      console.log('Serving control UI from:', clientStaticPath)
       await runControlServer({
         hostname: argv.control.hostname,
         port: String(argv.control.port),
         baseURL: argv.control.address,
         clientStaticPath,
       })
+
+      // If no explicit endpoint was provided, derive it from the shared token
+      const tokenForEndpoint = configuredToken
+      if (tokenForEndpoint) {
+        const { tokenId, secret } = tokenForEndpoint
+        const wsBase = argv.control.address.replace(/^http/, 'ws')
+        const derivedEndpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
+        if (!argv.control.endpoint || argv.control.endpoint !== derivedEndpoint) {
+          argv.control.endpoint = derivedEndpoint
+          console.log('Auto-configured control endpoint:', argv.control.endpoint)
+        }
+      }
+
       console.log(`Control server started at ${argv.control.address}`)
     } catch (error) {
       console.error('Failed to start control server:', error)
     }
   }
-
-  const db = await loadStorage(
-    join(app.getPath('userData'), 'streamwall-storage.json'),
-  )
 
   console.debug('Creating StreamWindow...')
   const idGen = new StreamIDGenerator()
@@ -345,17 +986,106 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     activeColor: argv.window['active-color'],
     backgroundColor: argv.window['background-color'],
   }
-  const streamWindow = new StreamWindow(streamWindowConfig)
+  const gridBaseCount = Math.max(1, Math.min(argv.grid.count ?? 1, 6))
+  const windowPositions = argv.grid.positions ?? argv.grid.window
+  const windowGridPositions = argv.window.grids
+  const gridConfigs: GridInstanceConfig[] =
+    argv.grid.instances && argv.grid.instances.length > 0
+      ? argv.grid.instances
+      : Array.from({ length: gridBaseCount }, (_, idx): GridInstanceConfig => ({
+          id: `grid-${idx + 1}`,
+          index: idx + 1,
+          cols: argv.grid.cols,
+          rows: argv.grid.rows,
+          frameless: argv.window.frameless,
+          fullscreen: argv.window.fullscreen,
+        }))
+
+  const desiredCount = Math.max(1, gridBaseCount)
+  const fallbackPositions = [
+    { x: 0, y: 0 },
+    { x: 1920, y: 0 },
+    { x: 0, y: 1080 },
+    { x: 1920, y: 1080 },
+    { x: 0, y: 2160 },
+    { x: 1920, y: 2160 },
+  ]
+
+  const filledGridConfigs = [...gridConfigs.slice(0, desiredCount)]
+  for (let i = filledGridConfigs.length; i < desiredCount; i++) {
+    filledGridConfigs.push({
+      id: `grid-${i + 1}`,
+      index: i + 1,
+      cols: argv.grid.cols,
+      rows: argv.grid.rows,
+      x: fallbackPositions[i]?.x,
+      y: fallbackPositions[i]?.y,
+      frameless: argv.window.frameless,
+      fullscreen: argv.window.fullscreen,
+    })
+  }
+
+  let nextCellOffset = 0
+  const gridRuntimes = filledGridConfigs.map((instance, idx) => {
+    const gridId = instance.id ?? `grid-${idx + 1}`
+    const configuredPos =
+      windowGridPositions?.find((p) => p?.id === gridId || p?.index === (instance.index ?? idx + 1)) ??
+      windowPositions?.[idx]
+
+    const cols = instance.cols ?? argv.grid.cols
+    const rows = instance.rows ?? argv.grid.rows
+    const width = instance.width ?? argv.window.width
+    const height = instance.height ?? argv.window.height
+
+    const x =
+      configuredPos?.x ?? instance.x ?? (argv.window.x != null ? argv.window.x + idx * 40 : undefined)
+    const y =
+      configuredPos?.y ?? instance.y ?? (argv.window.y != null ? argv.window.y + idx * 40 : undefined)
+
+    const positionedConfig = {
+      ...streamWindowConfig,
+      cols,
+      rows,
+      width,
+      height,
+      x,
+      y,
+      frameless: instance.frameless ?? streamWindowConfig.frameless,
+    }
+
+    const runtime = {
+      id: gridId,
+      cellOffset: nextCellOffset,
+      config: positionedConfig,
+      window: new StreamWindow({ ...positionedConfig }),
+    }
+    console.log('[main] created grid runtime', runtime.id, 'pos', { x, y }, 'size', { width, height }, 'cells', cols * rows)
+    nextCellOffset += cols * rows
+    return runtime
+  })
+  const gridCount = gridRuntimes.length
+  const gridRuntimeMap = new Map(gridRuntimes.map((grid) => [grid.id, grid]))
+  const gridSpotlight = new Map<string, string | null>()
   const controlWindow = new ControlWindow()
+  controlWindow.on('close', () => {
+    console.warn('Control window closed; quitting app.')
+    app.quit()
+  })
 
   let browseWindow: BrowserWindow | null = null
   let streamdelayClient: StreamdelayClient | null = null
+  const gridViewState = new Map<string, ViewState[]>()
 
   console.debug('Creating initial state...')
   const initialSavedLayouts = db.data.savedLayouts ? Object.fromEntries(
     Object.entries(db.data.savedLayouts).map(([key, value]) => [
       key,
-      { name: value.name, timestamp: value.timestamp }
+      {
+        name: value.name,
+        timestamp: value.timestamp,
+        gridSize: value.gridSize,
+        gridId: value.gridId,
+      }
     ])
   ) : undefined
   console.debug('Initial savedLayouts loaded from DB:', initialSavedLayouts)
@@ -364,36 +1094,42 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     identity: {
       role: 'local',
     },
-    config: streamWindowConfig,
+    config: gridRuntimes[0]?.config ?? streamWindowConfig,
+    grids: gridRuntimes.map((grid) => ({
+      id: grid.id,
+      config: grid.config,
+      views: [],
+      cellOffset: grid.cellOffset,
+    })),
     streams: [],
     customStreams: [],
     views: [],
     streamdelay: null,
-    savedLayouts: initialSavedLayouts
-  }
-
-  function updateViewsFromStateDoc() {
-    try {
-      const viewContentMap = new Map()
-      for (const [key, viewData] of viewsState) {
-        const streamId = viewData.get('streamId')
-        const stream = clientState.streams.find((s) => s._id === streamId)
-        if (!stream) {
-          continue
-        }
-        viewContentMap.set(key, {
-          url: stream.link,
-          kind: stream.kind || 'video',
-        })
-      }
-      streamWindow.setViews(viewContentMap, clientState.streams)
-    } catch (err) {
-      console.error('Error updating views', err)
-    }
+    overlayLabelFontSize: 16,
+    savedLayouts: initialSavedLayouts,
+    refreshSchedule: {
+      enabled: argv.maintenance?.['refresh-all']?.enabled ?? false,
+      time: argv.maintenance?.['refresh-all']?.time ?? '02:00',
+    },
   }
 
   const stateDoc = new Y.Doc()
   const viewsState = stateDoc.getMap<Y.Map<string | undefined>>('views')
+  const uiStateMap = stateDoc.getMap<Y.AbstractType>('uiState')
+
+  const yMapToObject = (m: Y.Map<any>): Record<string, any> => {
+    const out: Record<string, any> = {}
+    m.forEach((v, k) => {
+      if (v instanceof Y.Map) {
+        out[k] = yMapToObject(v as Y.Map<any>)
+      } else {
+        out[k] = v
+      }
+    })
+    return out
+  }
+
+  const serializeUiState = () => yMapToObject(uiStateMap as unknown as Y.Map<any>)
 
   if (db.data.stateDoc) {
     console.log('Loading stateDoc from storage...')
@@ -415,7 +1151,11 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   )
 
   stateDoc.transact(() => {
-    for (let i = 0; i < argv.grid.cols * argv.grid.rows; i++) {
+    const totalCells = gridRuntimes.reduce(
+      (sum, grid) => sum + grid.config.cols * grid.config.rows,
+      0,
+    )
+    for (let i = 0; i < totalCells; i++) {
       if (viewsState.has(String(i))) {
         continue
       }
@@ -425,10 +1165,92 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     }
   })
 
-  updateViewsFromStateDoc()
-  viewsState.observeDeep(updateViewsFromStateDoc)
+  const ensureViewEntry = (globalIdx: number) => {
+    let entry = viewsState.get(String(globalIdx))
+    if (!entry) {
+      entry = new Y.Map<string | undefined>()
+      entry.set('streamId', undefined)
+      viewsState.set(String(globalIdx), entry)
+    }
+    return entry
+  }
 
-  const onCommand = async (msg: ControlCommand) => {
+  const defaultGridId = gridRuntimes[0]?.id ?? 'grid-1'
+  const resolveGridId = (gridId?: string) =>
+    (gridId && gridRuntimeMap.has(gridId)) ? gridId : defaultGridId
+
+  const getGridRuntime = (gridId?: string) => {
+    const resolvedId = resolveGridId(gridId)
+    const runtime = gridRuntimeMap.get(resolvedId)
+    if (!runtime) {
+      throw new Error(`Unknown grid id: ${gridId}`)
+    }
+    return runtime
+  }
+
+  function updateViewsFromStateDocForGrid(gridId: string) {
+    const grid = gridRuntimeMap.get(gridId)
+    if (!grid) {
+      return
+    }
+
+    try {
+      const viewContentMap = new Map()
+      const cellCount = grid.config.cols * grid.config.rows
+      for (let localIdx = 0; localIdx < cellCount; localIdx++) {
+        const globalIdx = grid.cellOffset + localIdx
+        const viewData = ensureViewEntry(globalIdx)
+        const streamId = viewData.get('streamId')
+        const stream = clientState.streams.byId?.get(streamId)
+        if (!stream) {
+          continue
+        }
+        viewContentMap.set(String(localIdx), {
+          url: stream.link,
+          kind: stream.kind || 'video',
+          streamId: stream._id,
+        })
+      }
+      grid.window.setViews(viewContentMap, clientState.streams)
+    } catch (err) {
+      console.error(`Error updating views for ${gridId}`, err)
+    }
+  }
+
+  for (const grid of gridRuntimes) {
+    updateViewsFromStateDocForGrid(grid.id)
+  }
+
+  viewsState.observeDeep(() => {
+    for (const grid of gridRuntimes) {
+      updateViewsFromStateDocForGrid(grid.id)
+    }
+  })
+
+  let tomlFiles: string[] = []
+  let refreshScheduleTimer: NodeJS.Timeout | null = null
+
+  type ExtendedControlCommand =
+    | ControlCommand
+    | { type: 'export-layout-slot'; slot: number; gridId?: string }
+    | { type: 'export-layouts'; gridId?: string }
+    | { type: 'import-layouts'; gridId?: string }
+    | { type: 'export-streams-toml' }
+    | { type: 'import-streams-toml' }
+    | { type: 'set-refresh-schedule'; enabled: boolean; time: string }
+    | { type: 'set-label-font-size'; fontSize: number }
+
+  type RemoteControlCommand = ExtendedControlCommand & {
+    id?: number
+    clientId?: string
+  }
+
+  const onCommand = async (msg: ExtendedControlCommand) => {
+    if (!msg || typeof msg !== 'object' || typeof (msg as any).type !== 'string') {
+      console.warn('Ignoring command with missing type', msg)
+      return
+    }
+
     console.debug('Received message:', msg)
     console.debug('Message type check:', {
       msgType: msg.type,
@@ -440,7 +1262,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     switch (msg.type) {
       case 'set-listening-view':
         console.debug('Setting listening view:', msg.viewIdx)
-        streamWindow.setListeningView(msg.viewIdx)
+        getGridRuntime(msg.gridId).window.setListeningView(msg.viewIdx)
         break
       case 'set-view-background-listening':
         console.debug(
@@ -448,11 +1270,17 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           msg.viewIdx,
           msg.listening,
         )
-        streamWindow.setViewBackgroundListening(msg.viewIdx, msg.listening)
+        getGridRuntime(msg.gridId).window.setViewBackgroundListening(
+          msg.viewIdx,
+          msg.listening,
+        )
         break
       case 'set-view-blurred':
         console.debug('Setting view blurred:', msg.viewIdx, msg.blurred)
-        streamWindow.setViewBlurred(msg.viewIdx, msg.blurred)
+        getGridRuntime(msg.gridId).window.setViewBlurred(
+          msg.viewIdx,
+          msg.blurred,
+        )
         break
       case 'rotate-stream':
         console.debug('Rotating stream:', msg.url, msg.rotation)
@@ -470,7 +1298,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         break
       case 'reload-view':
         console.debug('Reloading view:', msg.viewIdx)
-        streamWindow.reloadView(msg.viewIdx)
+        getGridRuntime(msg.gridId).window.reloadView(msg.viewIdx)
         break
       case 'browse':
       case 'dev-tools':
@@ -500,7 +1328,10 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           }
         } else if (msg.type === 'dev-tools') {
           console.debug('Opening DevTools for view:', msg.viewIdx)
-          streamWindow.openDevTools(msg.viewIdx, browseWindow.webContents)
+          getGridRuntime(msg.gridId).window.openDevTools(
+            msg.viewIdx,
+            browseWindow.webContents,
+          )
         }
         break
       case 'set-stream-censored':
@@ -515,17 +1346,70 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           streamdelayClient.setStreamRunning(msg.isStreamRunning)
         }
         break
+      case 'get-debug-logs': {
+        const grid = getGridRuntime(msg.gridId)
+        return {
+          gridId: grid.id,
+          logs: grid.window.getDebugLogs(),
+          runtime: grid.window.getRuntimeDiagnostics(),
+        }
+      }
       case 'refresh-all-views':
         console.debug('Refreshing all views sequentially...')
-        streamWindow.refreshAllViewsSequentially()
+        getGridRuntime(msg.gridId).window.refreshAllViewsSequentially()
         break
       case 'refresh-errored-views':
         console.debug('Refreshing errored views sequentially...')
-        streamWindow.refreshErroredViewsSequentially()
+        getGridRuntime(msg.gridId).window.refreshErroredViewsSequentially()
         break
+      case 'set-label-font-size': {
+        const clamped = Math.max(8, Math.min(48, Math.round(msg.fontSize)))
+        console.debug('[labels] setting overlay label font size to', clamped)
+        clientState = { ...clientState, overlayLabelFontSize: clamped }
+        updateState({ overlayLabelFontSize: clamped })
+        break
+      }
+      case 'set-refresh-schedule': {
+        const { enabled, time } = msg
+        if (!/^\d{2}:\d{2}$/.test(time)) {
+          console.warn('[schedule] invalid time format, expected HH:mm, got', time)
+          break
+        }
+        console.debug('[schedule] updating refresh schedule', { enabled, time })
+        await persistRefreshSchedule(enabled, time)
+        clientState = {
+          ...clientState,
+          refreshSchedule: { enabled, time },
+        }
+        updateState({ refreshSchedule: clientState.refreshSchedule })
+        scheduleRefreshAll(clientState.refreshSchedule)
+        break
+      }
+      case 'export-streams-toml': {
+        await exportStreamsToml()
+        break
+      }
+      case 'import-streams-toml': {
+        await importStreamsToml()
+        break
+      }
       case 'save-layout': {
         console.debug('Saving layout to slot:', msg.slot, 'with name:', msg.name)
-        const currentState = Y.encodeStateAsUpdate(stateDoc)
+        const targetGrid = getGridRuntime(msg.gridId)
+
+        const layoutDoc = new Y.Doc()
+        const layoutViews = layoutDoc.getMap<Y.Map<string | undefined>>('views')
+
+        const cellCount = targetGrid.config.cols * targetGrid.config.rows
+        for (let localIdx = 0; localIdx < cellCount; localIdx++) {
+          const globalIdx = targetGrid.cellOffset + localIdx
+          const sourceView = ensureViewEntry(globalIdx)
+          const savedView = new Y.Map<string | undefined>()
+          savedView.set('streamId', sourceView.get('streamId'))
+          layoutViews.set(String(localIdx), savedView)
+        }
+
+        const currentState = Y.encodeStateAsUpdate(layoutDoc)
         const slotKey = `slot${msg.slot}`
         db.update((data) => {
           if (!data.savedLayouts) {
@@ -534,7 +1418,9 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           data.savedLayouts[slotKey] = {
             name: msg.name,
             stateDoc: Buffer.from(currentState).toString('base64'),
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            gridSize: { cols: targetGrid.config.cols, rows: targetGrid.config.rows },
+            gridId: targetGrid.id,
           }
         })
         // Update client state
@@ -542,7 +1428,9 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           ...clientState.savedLayouts,
           [slotKey]: {
             name: msg.name,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            gridSize: { cols: targetGrid.config.cols, rows: targetGrid.config.rows },
+            gridId: targetGrid.id,
           }
         }
         console.debug('Updating savedLayouts in client state:', newSavedLayouts)
@@ -558,28 +1446,21 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         const savedLayout = db.data.savedLayouts?.[slotKey]
         if (savedLayout) {
           try {
+            const targetGrid = getGridRuntime(msg.gridId)
             const savedState = Buffer.from(savedLayout.stateDoc, 'base64')
-            
-            // Create a new document to extract the saved views
+
             const tempDoc = new Y.Doc()
             Y.applyUpdate(tempDoc, savedState)
             const tempViewsState = tempDoc.getMap<Y.Map<string | undefined>>('views')
-            
-            // Clear current state and apply saved views
+
+            const cellCount = targetGrid.config.cols * targetGrid.config.rows
+
             stateDoc.transact(() => {
-              // Clear all current streams
-              for (const [key, viewData] of viewsState) {
-                viewData.set('streamId', undefined)
-              }
-              
-              // Apply saved streams
-              for (const [key, savedViewData] of tempViewsState) {
-                if (viewsState.has(key)) {
-                  const currentViewData = viewsState.get(key)
-                  if (currentViewData) {
-                    currentViewData.set('streamId', savedViewData?.get('streamId'))
-                  }
-                }
+              for (let localIdx = 0; localIdx < cellCount; localIdx++) {
+                const globalIdx = targetGrid.cellOffset + localIdx
+                const currentViewData = ensureViewEntry(globalIdx)
+                const savedViewData = tempViewsState.get(String(localIdx))
+                currentViewData.set('streamId', savedViewData?.get('streamId'))
               }
             })
             console.debug('Layout loaded successfully:', savedLayout.name)
@@ -609,10 +1490,38 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         console.debug('Layout cleared successfully')
         break
       }
+      case 'export-layout-slot': {
+        const slotKey = `slot${msg.slot}`
+        if (!db.data.savedLayouts?.[slotKey]) {
+          console.warn('[layouts] no layout found for', slotKey)
+          break
+        }
+        await exportLayoutsToFile(db.data.savedLayouts, slotKey)
+        break
+      }
+      case 'export-layouts': {
+        if (!db.data.savedLayouts || Object.keys(db.data.savedLayouts).length === 0) {
+          console.warn('[layouts] nothing to export')
+          break
+        }
+        await exportLayoutsToFile(db.data.savedLayouts)
+        break
+      }
+      case 'import-layouts': {
+        try {
+          await importLayoutsFromFile()
+        } catch (err) {
+          console.warn('[layouts] failed to import', err)
+        }
+        break
+      }
       case 'spotlight':
-        console.debug('Spotlighting stream:', msg.url)
-        console.debug('Calling streamWindow.spotlight with URL:', msg.url)
-        streamWindow.spotlight(msg.url)
+        console.debug('Spotlighting stream:', msg.url, msg.streamId)
+        getGridRuntime(msg.gridId).window.toggleSpotlight(msg.url, msg.streamId)
+        break
+      case 'quit':
+        console.warn('[control] quit command received; quitting app')
+        app.quit()
         break
       default:
         console.warn('Unknown command type received:', msg.type)
@@ -621,13 +1530,186 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   const stateEmitter = new EventEmitter<{ state: [StreamwallState] }>()
 
+  async function exportLayoutsToFile(layouts: Record<string, any>, singleSlot?: string) {
+    const defaultName = singleSlot ? `streamwall-layout-${singleSlot}.json` : 'streamwall-layouts.json'
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Export layouts',
+      defaultPath: join(app.getPath('documents'), defaultName),
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (canceled || !filePath) {
+      return
+    }
+    const payload = singleSlot ? { [singleSlot]: layouts[singleSlot] } : layouts
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8')
+    console.log('[layouts] exported to', filePath)
+  }
+
+  async function importLayoutsFromFile() {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Import layouts',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (canceled || !filePaths?.[0]) {
+      return
+    }
+    const raw = fs.readFileSync(filePaths[0], 'utf-8')
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') {
+      throw new Error('Invalid layout file')
+    }
+    const incoming = parsed as Record<string, any>
+    db.update((data) => {
+      if (!data.savedLayouts) {
+        data.savedLayouts = {}
+      }
+      for (const [slotKey, value] of Object.entries(incoming)) {
+        if (value && typeof value === 'object' && value.stateDoc) {
+          data.savedLayouts[slotKey] = value as any
+        }
+      }
+    })
+
+    const nextSavedLayouts = db.data.savedLayouts
+      ? Object.fromEntries(
+          Object.entries(db.data.savedLayouts).map(([key, value]) => [
+            key,
+            {
+              name: (value as any).name,
+              timestamp: (value as any).timestamp,
+              gridSize: (value as any).gridSize,
+              gridId: (value as any).gridId,
+            },
+          ]),
+        )
+      : undefined
+
+    updateState({ savedLayouts: nextSavedLayouts })
+    console.log('[layouts] imported from', filePaths[0])
+  }
+
+  async function exportStreamsToml() {
+    const sourcePath = tomlFiles[0] ?? join(app.getPath('userData'), 'streams.toml')
+    if (!fs.existsSync(sourcePath)) {
+      console.warn('[streams] no streams.toml found at', sourcePath)
+      return
+    }
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      title: 'Export streams.toml',
+      defaultPath: join(app.getPath('documents'), 'streams.toml'),
+      filters: [{ name: 'TOML', extensions: ['toml'] }],
+    })
+    if (canceled || !filePath) {
+      return
+    }
+    fs.copyFileSync(sourcePath, filePath)
+    console.log('[streams] exported streams.toml to', filePath)
+  }
+
+  async function importStreamsToml() {
+    const { canceled, filePaths } = await dialog.showOpenDialog({
+      title: 'Import streams.toml',
+      properties: ['openFile'],
+      filters: [{ name: 'TOML', extensions: ['toml'] }],
+    })
+    if (canceled || !filePaths?.[0]) {
+      return
+    }
+
+    const targetPath = tomlFiles[0] ?? join(app.getPath('userData'), 'streams.toml')
+    fs.mkdirSync(dirname(targetPath), { recursive: true })
+    fs.copyFileSync(filePaths[0], targetPath)
+    console.log('[streams] imported streams.toml to', targetPath)
+  }
+
+  function scheduleRefreshAll(schedule: { enabled: boolean; time: string } | undefined) {
+    if (refreshScheduleTimer) {
+      clearTimeout(refreshScheduleTimer)
+      refreshScheduleTimer = null
+    }
+    if (!schedule?.enabled) {
+      console.debug('[schedule] refresh all disabled')
+      return
+    }
+
+    const now = new Date()
+    const [hoursStr, minutesStr] = schedule.time.split(':')
+    const target = new Date(now)
+    target.setHours(Number(hoursStr), Number(minutesStr), 0, 0)
+    if (target <= now) {
+      target.setDate(target.getDate() + 1)
+    }
+
+    const delayMs = target.getTime() - now.getTime()
+    console.debug('[schedule] next refresh-all at', target.toString(), 'in', delayMs, 'ms')
+
+    refreshScheduleTimer = setTimeout(async () => {
+      try {
+        console.log('[schedule] running scheduled refresh-all')
+        getGridRuntime().window.refreshAllViewsSequentially()
+      } catch (err) {
+        console.warn('[schedule] failed to run refresh-all', err)
+      } finally {
+        scheduleRefreshAll(schedule)
+      }
+    }, delayMs)
+  }
+
+  async function persistRefreshSchedule(enabled: boolean, time: string) {
+    const configPath = join(app.getPath('userData'), 'config.toml')
+    let current: StreamwallConfig = parseArgs()
+    const next: StreamwallConfig = {
+      ...current,
+      maintenance: {
+        ...(current.maintenance ?? {}),
+        'refresh-all': {
+          ...(current.maintenance?.['refresh-all'] ?? {}),
+          enabled,
+          time,
+        },
+      },
+    }
+    fs.writeFileSync(configPath, stringifyCanonicalConfig(next))
+    console.debug('[schedule] persisted refresh schedule to config', configPath)
+  }
+
   function updateState(newState: Partial<StreamwallState>) {
-    clientState = { ...clientState, ...newState }
+    const grids = gridRuntimes.map((grid) => ({
+      id: grid.id,
+      config: grid.config,
+      cellOffset: grid.cellOffset,
+      views: gridViewState.get(grid.id) ?? [],
+      spotlightStreamId: gridSpotlight.get(grid.id) ?? null,
+    }))
+
+    const primaryGrid = grids[0]
+
+    const uiState = serializeUiState()
+
+    clientState = {
+      ...clientState,
+      ...newState,
+      uiState,
+      grids,
+      config: primaryGrid?.config ?? clientState.config,
+      views: primaryGrid?.views ?? clientState.views,
+    }
+
     if (newState.savedLayouts) {
       console.debug('updateState called with savedLayouts:', newState.savedLayouts)
       console.debug('New clientState savedLayouts:', clientState.savedLayouts)
     }
-    streamWindow.onState(clientState)
+
+    for (const grid of gridRuntimes) {
+      const scopedState = {
+        ...clientState,
+        config: grid.config,
+        views: gridViewState.get(grid.id) ?? [],
+      }
+      grid.window.onState(scopedState)
+    }
+
     controlWindow.onState(clientState)
     stateEmitter.emit('state', clientState)
   }
@@ -635,18 +1717,32 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   // Wire up IPC:
 
   // StreamWindow view updates -> main
-  streamWindow.on('state', (viewStates) => {
-    updateState({ views: viewStates })
-  })
+  for (const grid of gridRuntimes) {
+    grid.window.on('state', (viewStates) => {
+      gridViewState.set(grid.id, viewStates)
+      updateState({})
+    })
 
-  // StreamWindow <- main init state
-  streamWindow.on('load', () => {
-    streamWindow.onState(clientState)
-  })
+    // StreamWindow <- main init state
+    grid.window.on('load', () => {
+      const scopedState = {
+        ...clientState,
+        config: grid.config,
+        views: gridViewState.get(grid.id) ?? [],
+      }
+      grid.window.onState(scopedState)
+    })
+
+    grid.window.on('spotlight-changed', (token) => {
+      gridSpotlight.set(grid.id, token)
+      updateState({})
+    })
+  }
 
   // Control <- main collab updates
   stateDoc.on('update', (update) => {
     controlWindow.onYDocUpdate(update)
+    updateState({})
   })
 
   // Control <- main init state
@@ -657,12 +1753,34 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   // Control -> main
   controlWindow.on('ydoc', (update) => Y.applyUpdate(stateDoc, update))
-  controlWindow.on('command', (command) => onCommand(command))
+  controlWindow.on('command', (command, respond) => {
+    if ((command as any)?.error) {
+      console.warn('Control window reported error:', (command as any).error)
+      respond({ error: 'invalid command' })
+      return
+    }
+    void onCommand(command).then(respond, (error) => {
+      console.error('Failed to handle local control command:', error)
+      respond({ error: 'command failed' })
+    })
+  })
 
   // TODO: Hide on macOS, allow reopening from dock
-  streamWindow.on('close', () => {
-    process.exit(0)
-  })
+  for (const grid of gridRuntimes) {
+    grid.window.on('close', () => {
+      console.warn('Stream window closed; quitting app.')
+      app.quit()
+    })
+  }
+
+  // If we weren't able to derive the control endpoint earlier (e.g., auto-start disabled),
+  // try to compute it now from the configured IP/token so remote setups still connect.
+  if (!argv.control.endpoint && configuredToken && argv.control.address) {
+    const { tokenId, secret } = configuredToken
+    const wsBase = argv.control.address.replace(/^http/, 'ws')
+    argv.control.endpoint = `${wsBase}/streamwall/${tokenId}/ws?token=${secret}`
+    console.log('Configured control endpoint:', argv.control.endpoint)
+  }
 
   if (argv.control.endpoint) {
     console.debug('Connecting to control server...')
@@ -703,7 +1821,45 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           return
         }
 
-        onCommand(msg as ControlCommand)
+        if ((msg as any).error) {
+          console.warn('Control WebSocket reported error:', (msg as any).error)
+          return
+        }
+
+        const command = msg as RemoteControlCommand
+        void onCommand(command).then(
+          (result) => {
+            if (
+              typeof command.id !== 'number' ||
+              typeof command.clientId !== 'string'
+            ) {
+              return
+            }
+            const response: ControlResponseMessage = {
+              type: 'command-response',
+              id: command.id,
+              clientId: command.clientId,
+              result,
+            }
+            ws.send(JSON.stringify(response))
+          },
+          (error) => {
+            console.error('Failed to handle remote control command:', error)
+            if (
+              typeof command.id !== 'number' ||
+              typeof command.clientId !== 'string'
+            ) {
+              return
+            }
+            const response: ControlResponseMessage = {
+              type: 'command-response',
+              id: command.id,
+              clientId: command.clientId,
+              result: { error: 'command failed' },
+            }
+            ws.send(JSON.stringify(response))
+          },
+        )
       }
     })
     stateEmitter.on('state', () => {
@@ -743,16 +1899,21 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       channel: twitchChannel,
     })
     twitchBot.on('setListeningView', (idx) => {
-      streamWindow.setListeningView(idx)
+      gridRuntimes[0]?.window.setListeningView(idx)
     })
     stateEmitter.on('state', () => twitchBot.onState(clientState))
     twitchBot.connect()
   }
 
   // Use default streams.toml from userData if no explicit data sources configured
-  const tomlFiles = argv.data['toml-file'].length > 0 
-    ? argv.data['toml-file']
+  const tomlFilesRaw = argv.data['toml-file']
+  tomlFiles = (tomlFilesRaw.length > 0
+    ? tomlFilesRaw
     : [join(app.getPath('userData'), 'streams.toml')]
+  ).map((p) => (isAbsolute(p) ? p : join(app.getPath('userData'), p)))
+  console.debug('Resolved TOML data files:', tomlFiles)
+
+  scheduleRefreshAll(clientState.refreshSchedule)
 
   const dataSources = [
     ...argv.data['json-url'].map((url) => {
@@ -767,15 +1928,33 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     markDataSource(overlayStreamData.gen(), 'overlay'),
   ]
 
+  console.log('[main] entering data loop')
   for await (const streams of combineDataSources(dataSources, idGen)) {
     updateState({ streams })
-    updateViewsFromStateDoc()
+    for (const grid of gridRuntimes) {
+      updateViewsFromStateDocForGrid(grid.id)
+    }
   }
+  console.log('[main] data loop completed (should not happen)')
 }
 
 function init() {
+  process.on('uncaughtException', (err) => {
+    console.error('Uncaught exception:', err)
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled rejection:', reason)
+  })
+  process.on('exit', (code) => {
+    console.log('Process exiting with code', code)
+  })
+
+  app.on('before-quit', () => console.warn('[app] before-quit'))
+  app.on('will-quit', () => console.warn('[app] will-quit'))
+  app.on('window-all-closed', () => console.warn('[app] window-all-closed'))
+
   console.debug('Parsing command line arguments...')
-  const argv = parseArgs()
+  let argv = parseArgs()
   if (argv.help) {
     return
   }
@@ -788,15 +1967,46 @@ function init() {
   updateElectronApp()
 
   console.debug('Setting up Electron...')
+  applyStreamwallRuntimeTuning(app.commandLine)
   app.commandLine.appendSwitch('high-dpi-support', '1')
   app.commandLine.appendSwitch('force-device-scale-factor', '1')
-
-  console.debug('Enabling Electron sandbox...')
-  app.enableSandbox()
+  // Allow media to autoplay without user gesture (packaged builds on new machines)
+  app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required')
+  // Keep renderers from being throttled when unfocused/occluded so streams stay smooth
+  app.commandLine.appendSwitch('disable-background-timer-throttling')
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 
   app
     .whenReady()
-    .then(() => main(argv))
+    .then(async () => {
+      const skipSetup = (argv as any)['skip-setup'] ?? (argv as any).skipSetup ?? false
+      if (skipSetup) {
+        console.log('[init] skip-setup flag present; launching main app without wizard')
+        await main(argv)
+        return
+      }
+      // Show config wizard before launching main windows
+      const result = await openConfigWizard(argv)
+      console.log('[init] Wizard result:', result)
+      if (!result) {
+        app.quit()
+        return
+      }
+
+      // Reload args from saved config to ensure consistency
+      argv = parseArgs()
+
+      console.log('[init] Parsed config after wizard. Launch?', result.launch)
+
+      if (result.launch) {
+        console.log('[init] Launching main app...')
+        await main(argv)
+      } else {
+        console.log('Configuration saved without launching.')
+        app.quit()
+      }
+    })
     .catch((err) => {
       console.error(err)
       process.exit(1)

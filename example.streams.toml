@@ -8,6 +8,14 @@ state  = "IA"
 latitude  = 41.5868
 longitude = -93.6250
 
+# HDHomeRun channels can also be listed here. The app starts and stops its
+# bundled converter automatically when this stream is placed on a grid.
+[[streams]]
+kind   = "hdhomerun"
+label  = "HDHomeRun 2.1"
+link   = "http://192.0.2.10:5004/auto/v2.1"
+source = "HDHomeRun"
+
 [[streams]]
 label  = "CBS MOC"
 link   = "http://10.215.238.4:80/hls/cbs.m3u8"

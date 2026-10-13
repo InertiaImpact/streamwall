@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   type AuthTokenInfo,
   type ControlCommandMessage,
+  type ControlResponseMessage,
   type ControlUpdateMessage,
   inviteLink,
   roleCan,
@@ -213,7 +214,7 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
           return
         }
 
-        let msg: ControlUpdateMessage
+        let msg: ControlUpdateMessage | ControlResponseMessage
 
         try {
           msg = JSON.parse(rawData.toString())
@@ -266,6 +267,20 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
                 console.error('failed to send spotlight update to client', client)
               }
             }
+          } else if (msg.type === 'command-response') {
+            const client = clients.get(msg.clientId)
+            if (!client || client.ws.readyState !== WebSocket.OPEN) {
+              return
+            }
+            const result =
+              msg.result != null &&
+              typeof msg.result === 'object' &&
+              !Array.isArray(msg.result)
+                ? msg.result
+                : { result: msg.result }
+            client.ws.send(
+              JSON.stringify({ ...result, response: true, id: msg.id }),
+            )
           }
         } catch (err) {
           console.error('Failed to handle ws message:', rawData, err)
@@ -424,6 +439,17 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
         }
 
         try {
+          if (
+            msg.type === 'get-debug-logs' &&
+            !roleCan(identity.role, 'get-debug-logs')
+          ) {
+            console.warn(
+              `Unauthorized attempt to read debug logs by "${identity.name}"`,
+            )
+            respond({ error: 'unauthorized' })
+            return
+          }
+
           // TEMP: Bypass role permission checks
           // if (!roleCan(identity.role, msg.type)) {
           //   console.warn(
@@ -453,7 +479,7 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
             console.debug('Forwarding quit command to streamwall')
             if (currentStreamwallConn) {
               streamwallConn.ws.send(
-                JSON.stringify({ ...msg, clientId: identity.tokenId }),
+                JSON.stringify({ ...msg, clientId }),
               )
               console.debug('Quit command sent to streamwall')
             } else {
@@ -463,7 +489,7 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
             console.debug('Forwarding message to streamwall:', msg.type)
             if (currentStreamwallConn) {
               streamwallConn.ws.send(
-                JSON.stringify({ ...msg, clientId: identity.tokenId }),
+                JSON.stringify({ ...msg, clientId }),
               )
               console.debug('Message sent to streamwall')
             } else {

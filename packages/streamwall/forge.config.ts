@@ -6,6 +6,35 @@ import { FusesPlugin } from '@electron-forge/plugin-fuses'
 import { VitePlugin } from '@electron-forge/plugin-vite'
 import type { ForgeConfig } from '@electron-forge/shared-types'
 import { FuseV1Options, FuseVersion } from '@electron/fuses'
+import { execFileSync } from 'child_process'
+import { existsSync, realpathSync } from 'fs'
+import path from 'path'
+
+function windowsFfmpegResources() {
+  if (process.platform !== 'win32') return []
+  let commandPath = process.env.STREAMWALL_FFMPEG_PATH
+  if (!commandPath) {
+    try {
+      commandPath = execFileSync('where.exe', ['ffmpeg'], {
+        encoding: 'utf8',
+      })
+        .trim()
+        .split(/\r?\n/)[0]
+    } catch {
+      // Developer startup can run without HDHomeRun support until FFmpeg is installed.
+      if (process.argv.includes('start')) return []
+      throw new Error('FFmpeg is required for the Windows installer')
+    }
+  }
+  const ffmpegPath = realpathSync(commandPath)
+  if (!existsSync(ffmpegPath))
+    throw new Error('FFmpeg is required for the Windows installer')
+  return [
+    ffmpegPath,
+    path.join(__dirname, 'third_party', 'FFmpeg-GPL-3.0.txt'),
+    path.join(__dirname, 'third_party', 'FFmpeg-NOTICE.txt'),
+  ]
+}
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -14,6 +43,7 @@ const config: ForgeConfig = {
     extraResource: [
       // Bundle the control client static files so the built app can serve them
       '../streamwall-control-client/dist',
+      ...windowsFfmpegResources(),
     ],
   },
   rebuildConfig: {},
