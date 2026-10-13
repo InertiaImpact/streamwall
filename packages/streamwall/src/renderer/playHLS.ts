@@ -3,12 +3,20 @@ import { CropRect } from 'streamwall-shared'
 import { CoalescingReporter } from './coalescingReporter'
 import {
   createTrafficCameraHlsConfig,
+  isExpiredMediaSegmentError,
   shouldGrantStartupGrace,
   shouldMarkPlaybackProgress,
   TRAFFIC_CAMERA_REQUEST_ADMISSION_FAILURE_MS,
   TRAFFIC_CAMERA_STARTUP_FAILURE_MS,
   TRAFFIC_CAMERA_STARTUP_GRACE_MS,
 } from './hlsTrafficCameraConfig'
+import {
+  BUFFERED_RECOVERY_NUDGE_SECONDS,
+  getBufferedAheadSeconds,
+  getJitteredRecoveryIntervalMs,
+  selectStallRecoveryAction,
+  STALL_RECOVERY_MS,
+} from './hlsStallRecovery'
 import { ScheduledHlsLoader } from './scheduledHlsLoader'
 
 // Parse src immediately on load
@@ -124,10 +132,6 @@ window.addEventListener('resize', applyCrop)
 // Start HLS loading immediately if src exists
 if (src) {
   const MAX_FATAL_ERRORS = 3
-  const STALL_RECOVERY_MS = 15_000
-  const STALL_HARD_RELOAD_MS = 45_000
-  const STALL_FAILURE_MS = 90_000
-  const RECOVERY_ATTEMPT_INTERVAL_MS = 15_000
   const NONFATAL_LOG_WINDOW_MS = 10_000
 
   let startupTimer: number | undefined
@@ -135,8 +139,9 @@ if (src) {
   let reportedFatal = false
   let playbackStarted = false
   let stallStartedAt: number | undefined
-  let lastRecoveryAttemptAt = 0
+  let nextRecoveryAttemptAt = 0
   let hardReloadAttempted = false
+  let lastExpiredSegmentResyncAt = 0
 
   const reportDebug = (
     level: 'info' | 'warning' | 'error',
@@ -167,6 +172,7 @@ if (src) {
     fatalErrorCount = 0
     playbackStarted = true
     stallStartedAt = undefined
+    nextRecoveryAttemptAt = 0
     hardReloadAttempted = false
     if (startupTimer) {
       window.clearTimeout(startupTimer)
@@ -312,6 +318,44 @@ if (src) {
       nonfatalErrorReporter.add(key, serializedError)
     }
 
+    // hls.js may promote a non-retryable fragment 404 to fatal before this
+    // listener runs. Handle this known rolling-window condition first so it
+    // resynchronizes rather than consuming the fatal-error budget.
+    if (isExpiredMediaSegmentError(serializedError)) {
+      const now = performance.now()
+      // One failed fragment can produce closely-spaced loader events. A short
+      // guard prevents them from repeatedly stopping a resync already in
+      // progress while still reacting quickly to a genuinely stale request.
+      if (now - lastExpiredSegmentResyncAt >= 2_000) {
+        lastExpiredSegmentResyncAt = now
+        const liveSyncPosition = hls.liveSyncPosition
+        reportDebug('warning', 'expired-segment-resync', {
+          url: serializedError.url,
+          responseCode: serializedError.responseCode,
+          currentTime: videoEl.currentTime,
+          liveSyncPosition,
+        })
+        try {
+          hls.stopLoad()
+          if (
+            typeof liveSyncPosition === 'number' &&
+            Number.isFinite(liveSyncPosition) &&
+            liveSyncPosition >= 0
+          ) {
+            videoEl.currentTime = liveSyncPosition
+            hls.startLoad(liveSyncPosition)
+          } else {
+            // This is primarily a startup fallback, before the latency
+            // controller has calculated a live position.
+            hls.startLoad()
+          }
+        } catch (err) {
+          console.warn('[HLS] expired segment resync failed', err)
+        }
+      }
+      return
+    }
+
     if (data.fatal) {
       fatalErrorCount += 1
       if (fatalErrorCount >= MAX_FATAL_ERRORS) {
@@ -344,22 +388,61 @@ if (src) {
       stallStartedAt ??= lastProgressTs
       const totalStallMs = now - stallStartedAt
       const current = videoEl.currentTime
+      const bufferedAheadSeconds = getBufferedAheadSeconds(
+        videoEl.buffered,
+        current,
+      )
+      const recoveryAction = selectStallRecoveryAction({
+        bufferedAheadSeconds,
+        totalStallMs,
+        hardReloadAttempted,
+      })
       console.warn('[HLS] playback stall detected', {
         stalledMs: Math.round(stalledMs),
         totalStallMs: Math.round(totalStallMs),
         currentTime: current,
         lastTime,
+        bufferedAheadSeconds,
+        recoveryAction,
       })
 
-      if (now - lastRecoveryAttemptAt >= RECOVERY_ATTEMPT_INTERVAL_MS) {
-        lastRecoveryAttemptAt = now
+      if (recoveryAction === 'fail') {
+        reportFatal('stall-timeout', {
+          stalledMs: Math.round(totalStallMs),
+          lastTime,
+          bufferedAheadSeconds: Math.round(bufferedAheadSeconds * 10) / 10,
+        })
+        return
+      }
+
+      if (now >= nextRecoveryAttemptAt) {
+        nextRecoveryAttemptAt = now + getJitteredRecoveryIntervalMs()
         reportDebug('warning', 'stall-recovery', {
           stalledMs: Math.round(totalStallMs),
           currentTime: videoEl.currentTime,
+          bufferedAheadSeconds: Math.round(bufferedAheadSeconds * 10) / 10,
+          recoveryAction,
         })
         try {
-          hls.startLoad()
-          hls.recoverMediaError()
+          if (recoveryAction === 'nudge-buffered-media') {
+            videoEl.currentTime = Math.min(
+              current + BUFFERED_RECOVERY_NUDGE_SECONDS,
+              current + Math.max(0, bufferedAheadSeconds - 0.1),
+            )
+          } else {
+            if (recoveryAction === 'restart-loading') {
+              hardReloadAttempted = true
+              console.warn('[HLS] hard reload after prolonged unbuffered stall')
+              reportDebug('warning', 'stall-hard-reload', {
+                stalledMs: Math.round(totalStallMs),
+                currentTime: videoEl.currentTime,
+                bufferedAheadSeconds: Math.round(bufferedAheadSeconds * 10) / 10,
+                recoveryAction,
+              })
+              hls.stopLoad()
+            }
+            hls.startLoad()
+          }
           videoEl
             .play()
             .catch((err) =>
@@ -367,29 +450,6 @@ if (src) {
             )
         } catch (err) {
           console.warn('[HLS] recover after stall failed', err)
-        }
-      }
-
-      if (totalStallMs > STALL_FAILURE_MS) {
-        reportFatal('stall-timeout', {
-          stalledMs: Math.round(totalStallMs),
-          lastTime,
-        })
-        return
-      }
-
-      if (totalStallMs > STALL_HARD_RELOAD_MS && !hardReloadAttempted) {
-        hardReloadAttempted = true
-        console.warn('[HLS] hard reload after prolonged stall')
-        reportDebug('warning', 'stall-hard-reload', {
-          stalledMs: Math.round(totalStallMs),
-          currentTime: videoEl.currentTime,
-        })
-        try {
-          hls.stopLoad()
-          hls.startLoad()
-        } catch (err) {
-          console.warn('[HLS] hard reload failed', err)
         }
       }
     }

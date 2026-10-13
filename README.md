@@ -42,6 +42,26 @@ Streamwall can load stream data from both JSON APIs and TOML files. Data sources
 npm start -- --data.json-url="https://your-site/api/streams.json" --data.toml-file="./streams.toml"
 ```
 
+### HDHomeRun channels
+
+Add a channel from the control window's **Custom Streams** section by choosing
+**HDHomeRun**, or add it to `streams.toml` in the app's user data folder:
+
+```toml
+[[streams]]
+kind = "hdhomerun"
+label = "Channel 2.1"
+link = "http://192.0.2.10:5004/auto/v2.1"
+source = "HDHomeRun"
+```
+
+Standard HDHomeRun URLs on port 5004 with `/auto/v...` or `/auto/ch...` are also
+recognized when their kind is `video`. Streamwall starts one local FFmpeg
+conversion per distinct channel used on the grid and stops it when the last
+view closes. H.264 video is copied without re-encoding; other video codecs are
+converted to H.264 for the built-in HLS player. The Windows installer includes
+FFmpeg, so no separate command or service is needed.
+
 ## Hotkeys
 
 The following hotkeys are available with the "control" webpage focused:

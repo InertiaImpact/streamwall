@@ -39,6 +39,7 @@ import {
   StreamData,
   StreamDelayStatus,
   StreamwallDebugLogEntry,
+  StreamwallRuntimeDiagnostics,
   StreamwallRole,
   StreamwallState,
   StreamWindowConfig,
@@ -107,7 +108,7 @@ export const GlobalStyle = createGlobalStyle`
   }
 `
 
-const normalStreamKinds = new Set(['video', 'audio', 'web'])
+const normalStreamKinds = new Set(['video', 'audio', 'web', 'hdhomerun'])
 function filterStreams(
   streams: StreamData[],
   wallStreamIds: Set<string>,
@@ -785,6 +786,8 @@ export function ControlUI({
     setShowDebug((prev) => !prev)
   }, [])
   const [debugLogs, setDebugLogs] = useState<StreamwallDebugLogEntry[]>([])
+  const [runtimeDiagnostics, setRuntimeDiagnostics] =
+    useState<StreamwallRuntimeDiagnostics>()
   const [debugLogError, setDebugLogError] = useState<string>()
   const canReadDebugLogs = roleCan(role, 'get-debug-logs')
   const refreshDebugLogs = useCallback(() => {
@@ -792,7 +795,11 @@ export function ControlUI({
       { type: 'get-debug-logs', gridId: activeGridId ?? undefined },
       (response) => {
         const result = response as
-          | { logs?: StreamwallDebugLogEntry[]; error?: string }
+          | {
+              logs?: StreamwallDebugLogEntry[]
+              runtime?: StreamwallRuntimeDiagnostics
+              error?: string
+            }
           | undefined
         if (result?.error) {
           setDebugLogError(result.error)
@@ -800,6 +807,7 @@ export function ControlUI({
         }
         if (Array.isArray(result?.logs)) {
           setDebugLogs(result.logs)
+          setRuntimeDiagnostics(result.runtime)
           setDebugLogError(undefined)
         } else {
           setDebugLogError('No diagnostic response received')
@@ -811,6 +819,7 @@ export function ControlUI({
   useEffect(() => {
     if (!showDebug || !canReadDebugLogs) {
       setDebugLogs([])
+      setRuntimeDiagnostics(undefined)
       setDebugLogError(undefined)
       return
     }
@@ -1230,11 +1239,10 @@ export function ControlUI({
         return
       }
       console.debug('Sending spotlight command for URL:', stream.link)
-      // Toggle spotlight state
-      setSpotlightedStreamId((prev) => (prev === streamId ? undefined : streamId))
       send({
         type: 'spotlight',
         url: stream.link,
+        streamId,
         gridId: activeGridId ?? undefined,
       })
     },
@@ -2216,6 +2224,17 @@ export function ControlUI({
                   <div style={{ margin: '6px 0', color: '#90a4ae' }}>
                     In-memory only; URL credentials, query parameters, and fragments are removed.
                   </div>
+                  {runtimeDiagnostics && (
+                    <div style={{ margin: '6px 0', color: '#b0bec5' }}>
+                      Streamwall {runtimeDiagnostics.appVersion} ·{' '}
+                      {runtimeDiagnostics.activeViewCount} views ·{' '}
+                      {runtimeDiagnostics.gridRendererProcessCount} grid renderer processes ·{' '}
+                      {runtimeDiagnostics.processCount} total processes ·{' '}
+                      {runtimeDiagnostics.totalWorkingSetMB.toLocaleString()} MB working set ·{' '}
+                      {runtimeDiagnostics.gpuWorkingSetMB.toLocaleString()} MB GPU-process working set ·{' '}
+                      {runtimeDiagnostics.freeSystemMemoryMB.toLocaleString()} MB system memory free
+                    </div>
+                  )}
                   {debugLogError && (
                     <div style={{ marginBottom: '6px', color: '#ef9a9a' }}>
                       {debugLogError}
@@ -3539,6 +3558,7 @@ function CreateCustomStreamInput({
         value={kind}
       >
         <option value="video">video</option>
+        <option value="hdhomerun">HDHomeRun</option>
         <option value="audio">audio</option>
         <option value="web">web</option>
         <option value="overlay">overlay</option>

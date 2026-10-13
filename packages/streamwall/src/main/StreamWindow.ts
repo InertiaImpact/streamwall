@@ -1,5 +1,5 @@
 import assert from 'assert'
-import { BrowserWindow, ipcMain, WebContents, WebContentsView } from 'electron'
+import { app, BrowserWindow, ipcMain, WebContents, WebContentsView } from 'electron'
 import EventEmitter from 'events'
 import intersection from 'lodash/intersection'
 import isEqual from 'lodash/isEqual'
@@ -24,11 +24,17 @@ import {
 } from 'streamwall-shared'
 import { createActor, EventFrom, SnapshotFrom } from 'xstate'
 import {
+  getMediaSessionPartition,
+  HLS_MEDIA_SESSION_POOL_COUNT,
+  isIowaDotHlsURL,
+} from './hlsMediaSessionPool'
+import {
   hlsRequestScheduler,
   type HlsRequestSchedulerEvent,
 } from './hlsRequestScheduler'
 import { hlsStartupScheduler } from './hlsStartupScheduler'
 import { loadHTML } from './loadHTML'
+import { createRuntimeDiagnostics } from './runtimeDiagnostics'
 import viewStateMachine, { ViewActor } from './viewStateMachine'
 
 const DEBUG_LOG_LIMIT = 250
@@ -47,6 +53,8 @@ const DEBUG_DETAIL_KEYS = new Set([
   'totalStallMs',
   'lastTime',
   'currentTime',
+  'bufferedAheadSeconds',
+  'recoveryAction',
   'activeStartups',
   'queuedStartups',
   'queueWaitMs',
@@ -192,7 +200,7 @@ export interface StreamWindowEventMap {
   load: []
   close: []
   state: [ViewState[]]
-  'spotlight-local': [string | undefined, string | undefined]
+  'spotlight-changed': [string | null]
 }
 
 export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
@@ -205,8 +213,11 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   debugLogs: StreamwallDebugLogEntry[] = []
   nextDebugLogId = 1
   hlsRequestTelemetry = new Map<string, HlsRequestTelemetryBucket>()
+  private spotlightToken: string | null = null
+  private spotlightViewId: number | null = null
   static ipcRegistered = false
   static senderToWindow = new Map<number, StreamWindow>()
+  static nextHlsMediaSessionPool = 0
 
   constructor(config: StreamWindowConfig) {
     super()
@@ -317,6 +328,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         width: bounds.width,
         height: bounds.height,
       })
+      this.applySpotlight()
     }
     win.on('resize', syncBounds)
     syncBounds()
@@ -348,8 +360,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       'spotlight-local',
       (ev, { url, streamId }: { url?: string; streamId?: string }) => {
         const inst = StreamWindow.senderToWindow.get(ev.sender.id)
-        if (!inst) return
-        inst.emit('spotlight-local', url, streamId)
+        if (!inst || ev.sender !== inst.overlayView.webContents) return
+        inst.toggleSpotlight(url, streamId)
       },
     )
 
@@ -700,22 +712,57 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     return this.debugLogs.slice()
   }
 
-  createView() {
+  getRuntimeDiagnostics() {
+    const metrics = app.getAppMetrics().map((metric) => ({
+      pid: metric.pid,
+      type: metric.type,
+      memory: {
+        workingSetSize: metric.memory.workingSetSize,
+      },
+    }))
+    const gridRendererProcessIds = Array.from(this.views.values(), (view) =>
+      view.getSnapshot().context.view.webContents.getOSProcessId(),
+    )
+
+    return createRuntimeDiagnostics({
+      appVersion: app.getVersion(),
+      metrics,
+      gridRendererProcessIds,
+      activeViewCount: this.views.size,
+      systemMemory: process.getSystemMemoryInfo(),
+    })
+  }
+
+  createView(content?: ViewContent) {
     const { win } = this
     assert(win != null, 'Window must be initialized')
     const { backgroundColor } = this.config
+    const useHlsMediaPool = isIowaDotHlsURL(content?.url)
+    const sessionPool = StreamWindow.nextHlsMediaSessionPool
+    if (useHlsMediaPool) {
+      StreamWindow.nextHlsMediaSessionPool =
+        (StreamWindow.nextHlsMediaSessionPool + 1) %
+        HLS_MEDIA_SESSION_POOL_COUNT
+    }
+    const partition = getMediaSessionPartition(content?.url, sessionPool)
     const view = new WebContentsView({
       webPreferences: {
         preload: path.join(__dirname, 'mediaPreload.js'),
         nodeIntegration: false,
         contextIsolation: true,
         backgroundThrottling: false,
-        partition: 'persist:session',
+        partition,
       },
     })
     view.setBackgroundColor(backgroundColor)
 
     const viewId = view.webContents.id
+    if (useHlsMediaPool) {
+      console.debug('[HLS sessions] assigned media view', {
+        viewId,
+        partition,
+      })
+    }
     hlsRequestScheduler.registerRenderer(viewId, (event) =>
       this.recordHlsRequestEvent(viewId, event),
     )
@@ -745,6 +792,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         return
       }
       lastSnapshot = snapshot
+      if (
+        this.spotlightToken &&
+        snapshot.matches({ displaying: 'running' }) &&
+        (snapshot.context.content?.streamId === this.spotlightToken ||
+          snapshot.context.content?.url === this.spotlightToken)
+      ) {
+        this.applySpotlight()
+      }
       this.emitState()
     })
 
@@ -824,7 +879,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     }
 
     for (const box of remainingBoxes) {
-      const view = this.createView()
+      const view = this.createView(box.content)
       viewsToDisplay.push({ box, view })
     }
 
@@ -874,6 +929,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       StreamWindow.senderToWindow.delete(viewId)
     }
     this.views = newViews
+    this.applySpotlight()
     this.emitState()
   }
 
@@ -988,6 +1044,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
 
   onState(state: StreamwallState) {
     this.overlayView.webContents.send('state', state)
+    this.syncSpotlightOverlay()
     this.backgroundView.webContents.send('state', state)
 
     for (const view of this.views.values()) {
@@ -1009,8 +1066,89 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     }
   }
 
-  spotlight(url?: string, streamId?: string) {
-    console.debug('Spotlighting stream:', url, streamId)
-    this.overlayView.webContents.send('spotlight', { url, streamId })
+  toggleSpotlight(url?: string, streamId?: string) {
+    const actor = Array.from(this.views.values()).find((view) => {
+      const content = view.getSnapshot().context.content
+      if (!content) return false
+      return streamId != null
+        ? content.streamId === streamId
+        : url != null && content.url === url
+    })
+    if (!actor) return
+    const content = actor.getSnapshot().context.content
+    if (!content) return
+    const token = content.streamId ?? content.url
+    this.setSpotlight(this.spotlightToken === token ? null : token)
+  }
+
+  private setSpotlight(token: string | null) {
+    if (this.spotlightToken === token) return
+    if (this.spotlightViewId !== null) {
+      const previous = this.views.get(this.spotlightViewId)?.getSnapshot().context
+      if (previous?.pos && !previous.view.webContents.isDestroyed()) {
+        try {
+          previous.view.setBounds(previous.pos)
+        } catch (error) {
+          console.warn('[spotlight] failed to restore view bounds', error)
+        }
+      }
+      this.spotlightViewId = null
+    }
+    this.spotlightToken = token
+    this.applySpotlight()
+    this.syncSpotlightOverlay()
+    this.emit('spotlight-changed', this.spotlightToken)
+  }
+
+  private syncSpotlightOverlay() {
+    if (this.overlayView.webContents.isDestroyed()) return
+    const selected = this.findSpotlightView()?.getSnapshot().context.content
+    this.overlayView.webContents.send('spotlight', {
+      url: selected?.url,
+      streamId: selected?.streamId,
+    })
+  }
+
+  private findSpotlightView() {
+    if (!this.spotlightToken) return undefined
+    return Array.from(this.views.values()).find((view) => {
+      const content = view.getSnapshot().context.content
+      return (
+        content?.streamId === this.spotlightToken ||
+        content?.url === this.spotlightToken
+      )
+    })
+  }
+
+  private applySpotlight() {
+    if (!this.spotlightToken) return
+    const actor = this.findSpotlightView()
+    if (!actor) {
+      this.setSpotlight(null)
+      return
+    }
+    const snapshot = actor.getSnapshot()
+    if (!snapshot.matches({ displaying: 'running' })) return
+    const view = snapshot.context.view
+    if (view.webContents.isDestroyed() || this.win.isDestroyed()) return
+    const bounds = this.win.getContentBounds()
+    const width = Math.max(1, Math.round(bounds.width * 0.8))
+    const height = Math.max(1, Math.round(bounds.height * 0.8))
+    try {
+      // Keep the existing player above other tiles and below the clickable overlay.
+      this.win.contentView.addChildView(
+        view,
+        this.win.contentView.children.length - 2,
+      )
+      view.setBounds({
+        x: Math.round((bounds.width - width) / 2),
+        y: Math.round((bounds.height - height) / 2),
+        width,
+        height,
+      })
+      this.spotlightViewId = snapshot.context.id
+    } catch (error) {
+      console.warn('[spotlight] failed to enlarge view', error)
+    }
   }
 }

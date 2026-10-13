@@ -3,10 +3,11 @@ import type {
   HlsRequestKind,
   HlsRequestOutcome,
 } from 'streamwall-shared'
+import { HLS_MEDIA_SESSION_POOL_COUNT } from './hlsMediaSessionPool'
 
 export interface HlsRequestSchedulerOptions {
   maxConcurrentPerHost: number
-  maxQueueWaitMs: number
+  maxQueueWaitMs: number | null
 }
 
 export interface HlsRequest {
@@ -51,7 +52,7 @@ type SchedulerObserver = (event: HlsRequestSchedulerEvent) => void
 interface QueuedRequest extends HlsRequest {
   enqueuedAt: number
   resolve: (result: HlsRequestAcquireResult) => void
-  rejectionTimer: ReturnType<typeof setTimeout>
+  rejectionTimer?: ReturnType<typeof setTimeout>
 }
 
 interface ActiveRequest extends HlsRequest {
@@ -60,14 +61,15 @@ interface ActiveRequest extends HlsRequest {
   observer?: SchedulerObserver
 }
 
-export const DEFAULT_HLS_REQUEST_SCHEDULER_OPTIONS: HlsRequestSchedulerOptions = {
-  // Match the conservative HTTP/1.1 per-origin connection budget used by
-  // Chromium while preventing dozens of slow Iowa DOT requests piling up.
-  maxConcurrentPerHost: 6,
-  // Reject stale live-media work instead of bypassing the hard cap. hls.js
-  // retries rejected loads with the configured jittered backoff.
-  maxQueueWaitMs: 5_000,
-}
+export const DEFAULT_HLS_REQUEST_SCHEDULER_OPTIONS: HlsRequestSchedulerOptions =
+  {
+    // Each media session owns Chromium's per-origin HTTP/1.1 connection pool.
+    // Keep a global safety ceiling while allowing all six pools to make progress.
+    maxConcurrentPerHost: 6 * HLS_MEDIA_SESSION_POOL_COUNT,
+    // hls.js cancels superseded live work itself. A separate five-second queue
+    // deadline caused healthy playlist and fragment requests to fail under load.
+    maxQueueWaitMs: null,
+  }
 
 /**
  * Fair, hard per-origin request scheduler.
@@ -90,15 +92,17 @@ export class HlsRequestScheduler {
   private nextPermitId = 1
 
   constructor(
-    options: HlsRequestSchedulerOptions =
-      DEFAULT_HLS_REQUEST_SCHEDULER_OPTIONS,
+    options: HlsRequestSchedulerOptions = DEFAULT_HLS_REQUEST_SCHEDULER_OPTIONS,
   ) {
     this.options = {
       maxConcurrentPerHost: Math.max(
         1,
         Math.floor(options.maxConcurrentPerHost),
       ),
-      maxQueueWaitMs: Math.max(1, options.maxQueueWaitMs),
+      maxQueueWaitMs:
+        options.maxQueueWaitMs == null
+          ? null
+          : Math.max(1, options.maxQueueWaitMs),
     }
   }
 
@@ -158,9 +162,11 @@ export class HlsRequestScheduler {
         ...request,
         enqueuedAt: Date.now(),
         resolve,
-        rejectionTimer: setTimeout(() => {
+      }
+      if (this.options.maxQueueWaitMs != null) {
+        queued.rejectionTimer = setTimeout(() => {
           this.rejectQueued(queued, 'queue-timeout')
-        }, this.options.maxQueueWaitMs),
+        }, this.options.maxQueueWaitMs)
       }
       this.queue.push(queued)
       this.notify(request.rendererId, {
@@ -192,11 +198,7 @@ export class HlsRequestScheduler {
     }
   }
 
-  release(
-    rendererId: number,
-    permitId: number,
-    outcome: HlsRequestOutcome,
-  ) {
+  release(rendererId: number, permitId: number, outcome: HlsRequestOutcome) {
     const request = this.active.get(permitId)
     if (!request || request.rendererId !== rendererId) return false
 
@@ -264,22 +266,33 @@ export class HlsRequestScheduler {
     const lastRenderer = this.lastAdmittedRendererByHost.get(host)
     const lastIndex =
       lastRenderer == null ? -1 : rendererIds.indexOf(lastRenderer)
-    for (let offset = 1; offset <= rendererIds.length; offset += 1) {
-      const nextRenderer =
-        rendererIds[(lastIndex + offset) % rendererIds.length]
-      const index = this.queue.findIndex(
-        (request) =>
-          request.host === host && request.rendererId === nextRenderer,
-      )
-      if (index !== -1) return index
+    // Keep playback media moving before servicing less time-sensitive work.
+    // Fairness is preserved within each priority class by rotating renderers.
+    for (const priority of [0, 1, 2]) {
+      for (let offset = 1; offset <= rendererIds.length; offset += 1) {
+        const nextRenderer =
+          rendererIds[(lastIndex + offset) % rendererIds.length]
+        const index = this.queue.findIndex(
+          (request) =>
+            request.host === host &&
+            request.rendererId === nextRenderer &&
+            this.requestPriority(request.kind) === priority,
+        )
+        if (index !== -1) return index
+      }
     }
     return -1
   }
 
+  private requestPriority(kind: HlsRequestKind) {
+    if (kind === 'fragment' || kind === 'key') return 0
+    if (kind === 'playlist' || kind === 'manifest') return 1
+    return 2
+  }
+
   private pumpHost(host: string) {
     while (
-      (this.activeByHost.get(host) ?? 0) <
-      this.options.maxConcurrentPerHost
+      (this.activeByHost.get(host) ?? 0) < this.options.maxConcurrentPerHost
     ) {
       const index = this.findFairRequestIndex(host)
       if (index === -1) return

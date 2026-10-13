@@ -1,0 +1,13 @@
+Streamwall bundles FFmpeg as a separate executable for HDHomeRun playback.
+
+The Windows build uses the FFmpeg executable installed on the build machine.
+Its exact version and build configuration can be read with `ffmpeg.exe -version`.
+The Gyan Doshi build used for this release is licensed under GPL version 3.
+Its license is included as FFmpeg-GPL-3.0.txt.
+
+Build information and the corresponding FFmpeg source are available at:
+https://www.gyan.dev/ffmpeg/builds/
+https://github.com/FFmpeg/FFmpeg
+
+FFmpeg is launched as a separate process only while an HDHomeRun stream is
+displayed. Streamwall and FFmpeg remain separate programs.

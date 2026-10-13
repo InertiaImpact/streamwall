@@ -13,7 +13,7 @@ const api = {
       ipcRenderer.off('state', internalHandler)
     }
   },
-  onSpotlight: (handleSpotlight: (url: string, streamId?: string) => void) => {
+  onSpotlight: (handleSpotlight: (url?: string, streamId?: string) => void) => {
     const internalHandler = (
       _ev: IpcRendererEvent,
       payload: { url?: string; streamId?: string },

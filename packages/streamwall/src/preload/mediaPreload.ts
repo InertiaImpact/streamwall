@@ -208,7 +208,10 @@ class CropController {
       return
     }
 
-    const scale = Math.max(containerWidth / crop.width, containerHeight / crop.height)
+    const scale = Math.max(
+      containerWidth / crop.width,
+      containerHeight / crop.height,
+    )
     const targetWidth = this.video.videoWidth * scale
     const targetHeight = this.video.videoHeight * scale
 
@@ -387,13 +390,22 @@ async function main() {
 
   let rotationController: RotationController | undefined
   let cropController: CropController | undefined
-  if (content.kind === 'video' || content.kind === 'audio') {
+  if (
+    content.kind === 'video' ||
+    content.kind === 'audio' ||
+    content.kind === 'hdhomerun'
+  ) {
     // Avoid overriding layout for the built-in HLS player so it can manage crop/transform itself.
     if (!isLocalHlsPlayer) {
       webFrame.insertCSS(VIDEO_OVERRIDE_STYLE, { cssOrigin: 'user' })
     }
-    const { info, video } = await findVideo(content.kind)
-    if (content.kind === 'video' && video instanceof HTMLVideoElement) {
+    const { info, video } = await findVideo(
+      content.kind === 'hdhomerun' ? 'video' : content.kind,
+    )
+    if (
+      (content.kind === 'video' || content.kind === 'hdhomerun') &&
+      video instanceof HTMLVideoElement
+    ) {
       rotationController = new RotationController(video)
       cropController = new CropController(video)
     }

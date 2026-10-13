@@ -30,6 +30,7 @@ import {
   watchDataFile,
 } from './data'
 import { loadStorage } from './storage'
+import { applyStreamwallRuntimeTuning } from './runtimeTuning'
 import StreamdelayClient from './StreamdelayClient'
 import StreamWindow from './StreamWindow'
 import TwitchBot from './TwitchBot'
@@ -1075,15 +1076,6 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   let streamdelayClient: StreamdelayClient | null = null
   const gridViewState = new Map<string, ViewState[]>()
 
-  function getSpotlightToken(url?: string, streamId?: string) {
-    if (streamId) return streamId
-    if (!url) return null
-    const fromUrl = clientState.streams.byURL?.get(url)
-    const preferred = fromUrl?.find((s) => !s.crop) ?? fromUrl?.[0]
-    const idFromUrl = preferred?._id
-    return idFromUrl ?? url
-  }
-
   console.debug('Creating initial state...')
   const initialSavedLayouts = db.data.savedLayouts ? Object.fromEntries(
     Object.entries(db.data.savedLayouts).map(([key, value]) => [
@@ -1356,7 +1348,11 @@ async function main(argv: ReturnType<typeof parseArgs>) {
         break
       case 'get-debug-logs': {
         const grid = getGridRuntime(msg.gridId)
-        return { gridId: grid.id, logs: grid.window.getDebugLogs() }
+        return {
+          gridId: grid.id,
+          logs: grid.window.getDebugLogs(),
+          runtime: grid.window.getRuntimeDiagnostics(),
+        }
       }
       case 'refresh-all-views':
         console.debug('Refreshing all views sequentially...')
@@ -1521,16 +1517,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       }
       case 'spotlight':
         console.debug('Spotlighting stream:', msg.url, msg.streamId)
-        console.debug('Calling grid spotlight with URL:', msg.url)
-        getGridRuntime(msg.gridId).window.spotlight(msg.url, msg.streamId)
-        {
-          const gridKey = resolveGridId(msg.gridId)
-          const token = getSpotlightToken(msg.url, msg.streamId)
-          const current = gridSpotlight.get(gridKey) ?? null
-          const next = current === token ? null : token
-          gridSpotlight.set(gridKey, next)
-          updateState({})
-        }
+        getGridRuntime(msg.gridId).window.toggleSpotlight(msg.url, msg.streamId)
         break
       case 'quit':
         console.warn('[control] quit command received; quitting app')
@@ -1746,11 +1733,8 @@ async function main(argv: ReturnType<typeof parseArgs>) {
       grid.window.onState(scopedState)
     })
 
-    grid.window.on('spotlight-local', (url, streamId) => {
-      const token = getSpotlightToken(url, streamId)
-      const current = gridSpotlight.get(grid.id) ?? null
-      const next = current === token ? null : token
-      gridSpotlight.set(grid.id, next)
+    grid.window.on('spotlight-changed', (token) => {
+      gridSpotlight.set(grid.id, token)
       updateState({})
     })
   }
@@ -1983,6 +1967,7 @@ function init() {
   updateElectronApp()
 
   console.debug('Setting up Electron...')
+  applyStreamwallRuntimeTuning(app.commandLine)
   app.commandLine.appendSwitch('high-dpi-support', '1')
   app.commandLine.appendSwitch('force-device-scale-factor', '1')
   // Allow media to autoplay without user gesture (packaged builds on new machines)

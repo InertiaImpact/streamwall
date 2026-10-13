@@ -111,10 +111,54 @@ test('rejects stale queued work instead of bypassing the cap', async () => {
   assert.equal(scheduler.getStats().activeRequests, 1)
   assert.ok(
     events.some(
-      (event) =>
-        event.type === 'rejected' && event.reason === 'queue-timeout',
+      (event) => event.type === 'rejected' && event.reason === 'queue-timeout',
     ),
   )
+})
+
+test('does not reject queued steady-state work when queue timeout is disabled', async () => {
+  const scheduler = createScheduler({
+    maxConcurrentPerHost: 1,
+    maxQueueWaitMs: null,
+  })
+  scheduler.registerRenderer(1)
+  scheduler.registerRenderer(2)
+
+  const active = await acquire(scheduler, 451, 1)
+  const queued = acquire(scheduler, 452, 2)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  assert.equal(scheduler.getStats().queuedRequests, 1)
+
+  if (active.admitted) scheduler.release(1, active.permitId, 'completed')
+  assert.equal((await queued).admitted, true)
+})
+
+test('prioritizes playback fragments over queued playlist refreshes', async () => {
+  const scheduler = createScheduler({
+    maxConcurrentPerHost: 1,
+    maxQueueWaitMs: null,
+  })
+  scheduler.registerRenderer(1)
+  scheduler.registerRenderer(2)
+  scheduler.registerRenderer(3)
+
+  const active = await acquire(scheduler, 461, 1)
+  const playlist = acquire(scheduler, 462, 2)
+  const fragment = scheduler.acquire({
+    requestId: 463,
+    rendererId: 3,
+    host: 'video.example',
+    kind: 'fragment',
+  })
+
+  if (active.admitted) scheduler.release(1, active.permitId, 'completed')
+  const fragmentAdmission = await fragment
+  assert.equal(fragmentAdmission.admitted, true)
+  assert.equal(scheduler.getStats().queuedRequests, 1)
+  if (fragmentAdmission.admitted) {
+    scheduler.release(3, fragmentAdmission.permitId, 'completed')
+  }
+  assert.equal((await playlist).admitted, true)
 })
 
 test('cancels queued and active work when a renderer is destroyed', async () => {
@@ -134,9 +178,9 @@ test('cancels queued and active work when a renderer is destroyed', async () => 
   assert.equal(active.admitted, true)
 })
 
-test('production defaults use a hard six-request origin budget', () => {
+test('production defaults cover all media session pools without queue expiry', () => {
   assert.deepEqual(DEFAULT_HLS_REQUEST_SCHEDULER_OPTIONS, {
-    maxConcurrentPerHost: 6,
-    maxQueueWaitMs: 5_000,
+    maxConcurrentPerHost: 36,
+    maxQueueWaitMs: null,
   })
 })

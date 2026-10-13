@@ -38,33 +38,21 @@ function Overlay({
   const [expandedStreamId, setExpandedStreamId] = useState<string | undefined>()
 
   const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
-    const key = streamId ?? url
-    setExpandedUrl((prev) => {
-      const shouldClose = expandedStreamId === streamId || (!streamId && prev === url)
-      const nextUrl = shouldClose ? undefined : url
-      const nextStreamId = shouldClose ? undefined : streamId
-      setExpandedStreamId(nextStreamId)
-      window.streamwallLayer.spotlight(nextUrl, nextStreamId)
-      return nextUrl
-    })
-  }, [expandedStreamId])
+    window.streamwallLayer.spotlight(url, streamId)
+  }, [])
   
   // Listen for spotlight messages from the main process
   useEffect(() => {
     console.debug('Setting up spotlight listener')
     const unsubscribe = window.streamwallLayer.onSpotlight(
-      (url: string, streamId?: string) => {
+      (url?: string, streamId?: string) => {
         console.debug('Received spotlight message for URL:', url, streamId)
-        const key = streamId ?? url
-        const isSame = expandedStreamId
-          ? expandedStreamId === streamId
-          : expandedUrl === url
-        setExpandedUrl(isSame ? undefined : url)
-        setExpandedStreamId(isSame ? undefined : streamId)
+        setExpandedUrl(url)
+        setExpandedStreamId(streamId)
       },
     )
     return unsubscribe
-  }, [expandedStreamId, expandedUrl])
+  }, [])
   
   // Memoize stream lookup map for faster access
   const streamsByUrl = useMemo(() => {
@@ -83,12 +71,6 @@ function Overlay({
     return map
   }, [streams])
   
-  const expandedData = expandedStreamId
-    ? streamsById.get(expandedStreamId)
-    : expandedUrl
-      ? streamsByUrl.get(expandedUrl)?.[0]
-      : undefined
-
   const expandedKey = expandedStreamId ?? expandedUrl
   
   const activeViews = views.filter(
@@ -125,6 +107,7 @@ function Overlay({
         const hasTitle = data && (data.label || data.source)
         const position = data?.labelPosition ?? 'top-left'
         const isExpanded = expandedKey === (content.streamId ?? content.url)
+        const isObscured = expandedKey != null && !isExpanded
         return (
           <div key={`${pos.spaces.join('-')}`}>
             <SpaceBorder
@@ -134,12 +117,13 @@ function Overlay({
               activeColor={activeColor}
               isListening={isListening}
               isExpanded={isExpanded}
+              isObscured={isObscured}
               isHighlighted={isExpanded}
               onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
-              <BlurCover isBlurred={isBlurred} />
-              {hasTitle && (
+              {!isObscured && <BlurCover isBlurred={isBlurred} />}
+              {!isObscured && hasTitle && (
                 <StreamTitle
                   position={position}
                   activeColor={activeColor}
@@ -159,7 +143,7 @@ function Overlay({
                   {(isListening || isBackgroundListening) && <FaVolumeUp />}
                 </StreamTitle>
               )}
-              {isLoading && <LoadingSpinner />}
+              {!isObscured && isLoading && <LoadingSpinner />}
             </SpaceBorder>
           </div>
         )
@@ -173,48 +157,6 @@ function Overlay({
           scrolling="no"
         />
       ))}
-      {expandedUrl && expandedData && (
-        <ExpandedOverlay onClick={() => toggleSpotlight(undefined, undefined)}>
-          <ExpandedContent onClick={() => toggleSpotlight(undefined, undefined)}>
-            {expandedData && (expandedData.label || expandedData.source) && (
-              <StreamTitle
-                position={expandedData.labelPosition ?? 'top-left'}
-                activeColor={activeColor}
-                fontSize={overlayLabelFontSize}
-                isListening={false}
-              >
-                <StreamIcon url={expandedData.link} />
-                <span>
-                  {expandedData.label ? (
-                    expandedData.label
-                  ) : (
-                    <>
-                      {expandedData.source} &ndash; {expandedData.city} {expandedData.state}
-                    </>
-                  )}
-                </span>
-              </StreamTitle>
-            )}
-            {/\.m3u8(\?.*)?$/.test(expandedUrl) ? (
-              <ExpandedVideoFrame
-                key={expandedUrl}
-                src={`./playHLS.html?src=${encodeURIComponent(expandedUrl)}${expandedData.crop ? `&crop=${encodeURIComponent(JSON.stringify(expandedData.crop))}` : ''}`}
-                sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"
-                allow="autoplay accelerometer camera geolocation gyroscope magnetometer microphone midi payment usb vr xr-spatial-tracking"
-                scrolling="no"
-              />
-            ) : (
-              <ExpandedVideoFrame
-                key={expandedUrl}
-                src={expandedUrl}
-                sandbox="allow-scripts allow-same-origin allow-presentation allow-forms"
-                allow="autoplay accelerometer camera geolocation gyroscope magnetometer microphone midi payment usb vr xr-spatial-tracking"
-                scrolling="no"
-              />
-            )}
-          </ExpandedContent>
-        </ExpandedOverlay>
-      )}
     </OverlayContainer>
   )
 }
@@ -301,93 +243,30 @@ const OverlayContainer = styled.div`
   overflow: hidden;
 `
 
-const ExpandedOverlay = styled.div`
-  position: fixed;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 10000;
-  background: transparent;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-`
-
-const ExpandedContent = styled.div`
-  position: relative;
-  width: 80vw;
-  height: 80vh;
-  max-width: 90vw;
-  max-height: 90vh;
-  overflow: hidden;
-  pointer-events: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-`
-
-const ExpandedVideoFrame = styled.iframe`
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  border: none;
-  pointer-events: none;
-  cursor: pointer;
-  object-fit: contain;
-`
-
-const CloseButton = styled.button`
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 10001;
-  background: rgba(0, 0, 0, 0.7);
-  color: white;
-  border: 1px solid #666;
-  border-radius: 4px;
-  width: 32px;
-  height: 32px;
-  font-size: 20px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  
-  &:hover {
-    background: rgba(0, 0, 0, 0.9);
-    border-color: #999;
-  }
-`
-
 const SpaceBorder = styled.div.attrs(() => ({
   borderWidth: 2,
 }))`
   display: flex;
   align-items: flex-start;
   position: fixed;
-  left: ${({ pos, isExpanded, windowWidth }) => isExpanded ? windowWidth * 0.1666 : pos.x}px;
-  top: ${({ pos, isExpanded, windowHeight }) => isExpanded ? windowHeight * 0.1666 : pos.y}px;
-  width: ${({ pos, isExpanded, windowWidth }) => isExpanded ? windowWidth * 0.6666 : pos.width}px;
-  height: ${({ pos, isExpanded, windowHeight }) => isExpanded ? windowHeight * 0.6666 : pos.height}px;
+  left: ${({ pos, isExpanded }) => isExpanded ? '10vw' : `${pos.x}px`};
+  top: ${({ pos, isExpanded }) => isExpanded ? '10vh' : `${pos.y}px`};
+  width: ${({ pos, isExpanded }) => isExpanded ? '80vw' : `${pos.width}px`};
+  height: ${({ pos, isExpanded }) => isExpanded ? '80vh' : `${pos.height}px`};
   border: 0 solid ${({ isHighlighted }) => (isHighlighted ? '#00ff00' : 'transparent')};
-  border-left-width: ${({ pos, borderWidth, isExpanded }) =>
-    (isExpanded || pos.x === 0) ? 0 : borderWidth}px;
-  border-right-width: ${({ pos, borderWidth, windowWidth, isExpanded }) =>
-    (isExpanded || pos.x + pos.width === windowWidth) ? 0 : borderWidth}px;
-  border-top-width: ${({ pos, borderWidth, isExpanded }) =>
-    (isExpanded || pos.y === 0) ? 0 : borderWidth}px;
-  border-bottom-width: ${({ pos, borderWidth, windowHeight, isExpanded }) =>
-    (isExpanded || pos.y + pos.height === windowHeight) ? 0 : borderWidth}px;
-  box-shadow: ${({ isListening, activeColor, isExpanded }) =>
-    isListening || isExpanded ? `0 0 10px ${activeColor} inset` : 'none'};
+  border-left-width: ${({ pos, borderWidth, isExpanded, isObscured }) =>
+    (isExpanded || isObscured || pos.x === 0) ? 0 : borderWidth}px;
+  border-right-width: ${({ pos, borderWidth, windowWidth, isExpanded, isObscured }) =>
+    (isExpanded || isObscured || pos.x + pos.width === windowWidth) ? 0 : borderWidth}px;
+  border-top-width: ${({ pos, borderWidth, isExpanded, isObscured }) =>
+    (isExpanded || isObscured || pos.y === 0) ? 0 : borderWidth}px;
+  border-bottom-width: ${({ pos, borderWidth, windowHeight, isExpanded, isObscured }) =>
+    (isExpanded || isObscured || pos.y + pos.height === windowHeight) ? 0 : borderWidth}px;
+  box-shadow: ${({ isListening, activeColor, isExpanded, isObscured }) =>
+    !isObscured && (isListening || isExpanded) ? `0 0 10px ${activeColor} inset` : 'none'};
   box-sizing: border-box;
   cursor: pointer;
-  transition: ${({ isExpanded }) => isExpanded ? 'all 0.3s ease' : 'none'};
+  transition: none;
   z-index: ${({ isExpanded }) => isExpanded ? 1000 : 1};
   pointer-events: auto;
   user-select: none;

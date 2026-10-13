@@ -31,7 +31,7 @@ export interface ContentViewInfo {
   title: string
 }
 
-export type ContentKind = 'video' | 'audio' | 'web' | 'background' | 'overlay'
+export type ContentKind = 'video' | 'audio' | 'web' | 'background' | 'overlay' | 'hdhomerun'
 
 export interface StreamDataContent extends ContentDisplayOptions {
   kind: ContentKind
@@ -190,7 +190,7 @@ export type ControlCommand =
   | { type: 'import-layouts'; gridId?: string }
   | { type: 'export-streams-toml' }
   | { type: 'import-streams-toml' }
-  | { type: 'spotlight'; url: string; gridId?: string }
+  | { type: 'spotlight'; url: string; streamId?: string; gridId?: string }
   | { type: 'quit' }
 
 export type ControlUpdate = {
@@ -218,6 +218,19 @@ export interface StreamwallDebugLogEntry {
   /** URL credentials, query parameters, and fragments are removed at collection time. */
   url?: string
   detail?: Record<string, string | number | boolean | null>
+}
+
+export interface StreamwallRuntimeDiagnostics {
+  timestamp: string
+  appVersion: string
+  processCount: number
+  rendererProcessCount: number
+  gridRendererProcessCount: number
+  activeViewCount: number
+  totalWorkingSetMB: number
+  gpuWorkingSetMB: number
+  totalSystemMemoryMB: number
+  freeSystemMemoryMB: number
 }
 
 export type HlsRequestKind =

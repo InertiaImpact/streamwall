@@ -28,7 +28,12 @@ export interface TrafficCameraHlsConfigOptions {
 function shouldRetryTransientResponse(
   response: LoaderResponse | undefined,
   defaultDecision: boolean,
+  retryNotFound: boolean,
 ) {
+  // A missing live media segment has already fallen out of the origin's
+  // sliding window. Retrying that URL cannot recover it; the player must
+  // refresh the playlist and resume at the live edge instead.
+  if (response?.code === 404 && !retryNotFound) return false
   return (
     defaultDecision ||
     (response?.code != null && TRANSIENT_HTTP_STATUSES.has(response.code))
@@ -40,6 +45,7 @@ function createRetryConfig(
   baseDelayMs: number,
   maxRetryDelayMs: number,
   random: () => number,
+  retryNotFound = true,
 ): RetryConfig {
   const applyJitter = (retryConfig: RetryConfig | null | undefined) => {
     if (!retryConfig) return
@@ -62,7 +68,11 @@ function createRetryConfig(
       defaultDecision,
     ) => {
       applyJitter(retryConfig)
-      return shouldRetryTransientResponse(response, defaultDecision)
+      return shouldRetryTransientResponse(
+        response,
+        defaultDecision,
+        retryNotFound,
+      )
     },
   }
 }
@@ -76,15 +86,23 @@ export function createTrafficCameraHlsConfig(
     // These walls favor continuity over sub-second latency. The measured Iowa
     // DOT origins routinely need several seconds to return playlists/segments.
     lowLatencyMode: false,
-    enableWorker: true,
+    // Each camera already runs in an isolated Electron renderer. Creating an
+    // additional transmuxing worker per tile multiplies process/thread overhead
+    // without isolating work any further.
+    enableWorker: false,
     startLevel: -1,
     defaultAudioCodec: undefined,
     maxBufferLength: 20,
     maxMaxBufferLength: 30,
-    backBufferLength: 20,
-    maxBufferSize: 60 * 1000 * 1000,
-    liveSyncDurationCount: 4,
-    liveMaxLatencyDurationCount: 6,
+    // Retain the forward continuity buffer, but do not keep a second large
+    // history buffer for dozens of live-only tiles that never seek backwards.
+    backBufferLength: 2,
+    maxBufferSize: 12 * 1024 * 1024,
+    // Iowa DOT's KVDS playlists currently retain only seven complete
+    // segments. Staying two segments behind preserves a small continuity
+    // buffer without selecting media that is already close to eviction.
+    liveSyncDurationCount: 2,
+    liveMaxLatencyDurationCount: 3,
     maxLiveSyncPlaybackRate: 1.05,
     capLevelToPlayerSize: true,
     liveDurationInfinity: true,
@@ -109,8 +127,21 @@ export function createTrafficCameraHlsConfig(
         maxTimeToFirstByteMs: 20_000,
         maxLoadTimeMs: 60_000,
         timeoutRetry: createRetryConfig(4, 750, 12_000, random),
-        errorRetry: createRetryConfig(6, 750, 12_000, random),
+        errorRetry: createRetryConfig(6, 750, 12_000, random, false),
       },
     },
   }
+}
+
+export interface HlsLoadErrorLike {
+  details?: unknown
+  responseCode?: unknown
+  url?: unknown
+}
+
+export function isExpiredMediaSegmentError(error: HlsLoadErrorLike) {
+  return (
+    error.details === 'fragLoadError' &&
+    error.responseCode === 404
+  )
 }
