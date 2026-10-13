@@ -34,6 +34,23 @@ npm start -- --config="../streamwall.toml"
 
 See `example.config.toml` for an example.
 
+### Video decoding on large grids
+
+If many videos have buffered data but display few frames, try software video
+decoding. Add this to Streamwall's `config.toml`:
+
+```toml
+[performance]
+software-video-decode = true
+```
+
+Or add `--performance.software-video-decode=true` to the Streamwall shortcut.
+This setting takes effect at launch and uses more CPU. Set it to `false` in
+`config.toml` or pass `--performance.software-video-decode=false` to return to
+the default hardware decode path. For a frame-rate
+comparison, add `--media-health-log` to write rolling samples to
+`%APPDATA%\Streamwall\media-health.jsonl`.
+
 ## Data sources
 
 Streamwall can load stream data from both JSON APIs and TOML files. Data sources can be specified in a config file (see `example.config.toml` for an example) or the command line:

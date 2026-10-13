@@ -115,6 +115,9 @@ export interface StreamwallConfig {
   telemetry: {
     sentry: boolean
   }
+  performance: {
+    'software-video-decode': boolean
+  }
 }
 
 function parseArgs(): StreamwallConfig {
@@ -344,6 +347,12 @@ function parseArgs(): StreamwallConfig {
         describe: 'Enable error reporting to Sentry',
         boolean: true,
         default: true,
+      })
+      .group(['performance.software-video-decode'], 'Performance')
+      .option('performance.software-video-decode', {
+        describe: 'Decode video in software (higher CPU use; useful when hardware decode stutters)',
+        boolean: true,
+        default: false,
       })
       .group(['maintenance.refresh-all.enabled', 'maintenance.refresh-all.time'], 'Maintenance')
       .option('maintenance.refresh-all.enabled', {
@@ -581,6 +590,11 @@ function canonicalizeConfigForSave(config: StreamwallConfig) {
     },
     telemetry: {
       sentry: normalizeBoolean((config.telemetry as any)?.sentry),
+    },
+    performance: {
+      'software-video-decode': normalizeBoolean(
+        config.performance?.['software-video-decode'],
+      ) ?? false,
     },
   })
 }
@@ -1976,6 +1990,10 @@ function init() {
 
   console.debug('Setting up Electron...')
   applyStreamwallRuntimeTuning(app.commandLine)
+  if (argv.performance?.['software-video-decode']) {
+    app.commandLine.appendSwitch('disable-accelerated-video-decode')
+    console.log('[performance] software video decode enabled')
+  }
   app.commandLine.appendSwitch('high-dpi-support', '1')
   app.commandLine.appendSwitch('force-device-scale-factor', '1')
   // Allow media to autoplay without user gesture (packaged builds on new machines)

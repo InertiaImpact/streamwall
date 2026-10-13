@@ -147,3 +147,7 @@ json-url = []
 [streamdelay]
 #endpoint = "http://localhost:8404"
 #key = "super-secret"
+
+[performance]
+# Use more CPU to avoid hardware video decoder contention on large grids.
+software-video-decode = false

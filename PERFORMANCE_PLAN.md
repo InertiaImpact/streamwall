@@ -54,6 +54,20 @@ Streamwall used about 10.5 GB working set and 4.95 CPU cores in one sample;
 the GPU process used 2.4 of those cores. A GPU engine sample showed 53.5%
 video decode and 18.3% 3D utilization.
 
+### Local decode A/B (same 90-view layout)
+
+Ten consecutive 30-second snapshots with hardware decode averaged roughly
+2.7–3.7 fps across 85 sampled videos in the 12×12 grid. After a graceful
+restart with Chromium's `--disable-accelerated-video-decode`, five consecutive
+snapshots held at 16.5–16.8 fps with no more than one video below 5 fps. A GPU
+engine sample showed no video-decode activity in the software run. One process
+sample showed about 11.0 CPU cores and 11.7 GB working set, compared with
+about 5.0 cores and 10.5 GB in the hardware run. This is strong evidence that
+the local hardware-decode path is the limiting stage; it does not establish
+that other machines or codecs will benefit. Keep software decode opt-in in
+`config.toml` or with `--performance.software-video-decode=true` and compare it
+on the remote machine before changing any default.
+
 ## Success criteria and comparison method
 
 Use the same 93-tile layout and a fixed 30-minute camera set for each
@@ -103,7 +117,8 @@ remote comparison is complete.
 
 ## Phase 3: bounded HLS renderer consolidation (prototype)
 
-Prototype media hosts containing roughly 6-10 HLS video elements each,
+If the remote software-decode trial still has frame delivery or process-memory
+problems, prototype media hosts containing roughly 6-10 HLS video elements each,
 with several hosts per grid rather than one renderer per camera. Keep
 arbitrary web pages in isolated WebContentsViews. The media host owns tile
 positioning, crop, mute, errors, and per-video health; spotlight repositions
@@ -129,8 +144,12 @@ as a substitute for selecting a lower encoded rendition.
 
 ## Rollout order
 
-Ship the label fix separately. Deploy Phase 1 instrumentation to the remote
-machine, establish the 30-minute baseline, then trial Phase 2 changes one at
-a time. Attempt Phase 3 only if per-tile renderer or composition cost remains
-material. Each trial records its version, flags, layout, and result before
-promoting or reverting it.
+Version `2.5.0-bs` contains the opt-in software-decode setting and frame
+diagnostics. The local 90-view comparison passed, and the installed build
+retained the frame-rate improvement. On the remote machine, compare the same
+fixed camera set for 30 minutes with the setting off and on. Record frame
+delivery, stalls, CPU, memory, and startup failures. Keep the setting opt-in
+until that comparison is complete. Attempt Phase 3 only if frame delivery or
+process-memory cost remains material after the remote decode trial. Each trial
+records its version, flags, layout, and result before promoting or reverting
+it.
