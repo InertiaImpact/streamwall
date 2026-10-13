@@ -30,6 +30,7 @@ import {
   watchDataFile,
 } from './data'
 import { loadStorage } from './storage'
+import LocationFallbackController from './LocationFallbackController'
 import { applyStreamwallRuntimeTuning } from './runtimeTuning'
 import StreamdelayClient from './StreamdelayClient'
 import StreamWindow from './StreamWindow'
@@ -117,6 +118,9 @@ export interface StreamwallConfig {
   }
   performance: {
     'software-video-decode': boolean
+  }
+  recovery?: {
+    'nearby-fallback': boolean
   }
 }
 
@@ -351,6 +355,12 @@ function parseArgs(): StreamwallConfig {
       .group(['performance.software-video-decode'], 'Performance')
       .option('performance.software-video-decode', {
         describe: 'Decode video in software (higher CPU use; useful when hardware decode stutters)',
+        boolean: true,
+        default: false,
+      })
+      .group(['recovery.nearby-fallback'], 'Recovery')
+      .option('recovery.nearby-fallback', {
+        describe: 'Replace a failed geolocated video with the closest available camera',
         boolean: true,
         default: false,
       })
@@ -596,6 +606,9 @@ function canonicalizeConfigForSave(config: StreamwallConfig) {
         config.performance?.['software-video-decode'],
       ) ?? false,
     },
+    recovery: {
+      'nearby-fallback': normalizeBoolean(config.recovery?.['nearby-fallback']) ?? false,
+    },
   })
 }
 
@@ -640,6 +653,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
     host: initialHost,
     port: initialPort,
     softwareVideoDecode: currentConfig.performance?.['software-video-decode'] ?? false,
+    nearbyFallback: currentConfig.recovery?.['nearby-fallback'] ?? false,
     gridCount: initialGridCount,
     grids: instances.map((g, idx) => ({
       id: g.id ?? `grid-${idx + 1}`,
@@ -712,6 +726,10 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
           performance: {
             ...currentConfig.performance,
             'software-video-decode': payload.softwareVideoDecode === true,
+          },
+          recovery: {
+            ...currentConfig.recovery,
+            'nearby-fallback': payload.nearbyFallback === true,
           },
         }
 
@@ -805,6 +823,11 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
             <label><input id="softwareVideoDecode" type="checkbox" ${initialData.softwareVideoDecode ? 'checked' : ''} /> Decode video in software (uses more CPU; can improve large-grid playback)</label>
             <small>Applied when Streamwall launches. Leave off to use hardware video decoding.</small>
           </fieldset>
+          <fieldset>
+            <legend>Stream recovery</legend>
+            <label><input id="nearbyFallback" type="checkbox" ${initialData.nearbyFallback ? 'checked' : ''} /> Use the nearest available camera after three failed starts</label>
+            <small>Requires stream locations. Saved grid assignments stay unchanged.</small>
+          </fieldset>
           <div id="grids">${formRows}</div>
           <button id="toggleGrids">Show all grids</button>
           <div class="actions">
@@ -838,6 +861,7 @@ async function openConfigWizard(currentConfig: StreamwallConfig) {
                 host: document.getElementById('host').value || '0.0.0.0',
                 port: Number(document.getElementById('port').value) || ${initialPort},
                 softwareVideoDecode: document.getElementById('softwareVideoDecode').checked,
+                nearbyFallback: document.getElementById('nearbyFallback').checked,
                 gridCount: Number(document.getElementById('gridCount').value) || ${initialGridCount},
                 grids,
                 launch,
@@ -1059,6 +1083,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   }
 
   let nextCellOffset = 0
+  StreamWindow.nearbyFallbackEnabled = argv.recovery?.['nearby-fallback'] === true
   const gridRuntimes = filledGridConfigs.map((instance, idx) => {
     const gridId = instance.id ?? `grid-${idx + 1}`
     const configuredPos =
@@ -1221,6 +1246,25 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     return runtime
   }
 
+  const pendingFallbackUpdates = new Set<string>()
+  const fallbackControllers = new Map<string, LocationFallbackController>()
+  if (argv.recovery?.['nearby-fallback']) {
+    for (const grid of gridRuntimes) {
+      fallbackControllers.set(grid.id, new LocationFallbackController(
+        grid.id,
+        grid.window,
+        () => {
+          if (pendingFallbackUpdates.has(grid.id)) return
+          pendingFallbackUpdates.add(grid.id)
+          queueMicrotask(() => {
+            pendingFallbackUpdates.delete(grid.id)
+            updateViewsFromStateDocForGrid(grid.id)
+          })
+        },
+      ))
+    }
+  }
+
   function updateViewsFromStateDocForGrid(gridId: string) {
     const grid = gridRuntimeMap.get(gridId)
     if (!grid) {
@@ -1230,10 +1274,15 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     try {
       const viewContentMap = new Map()
       const cellCount = grid.config.cols * grid.config.rows
+      const desiredIds = Array.from({ length: cellCount }, (_, localIdx) =>
+        ensureViewEntry(grid.cellOffset + localIdx).get('streamId'),
+      )
+      const fallback = fallbackControllers.get(gridId)
+      fallback?.sync(desiredIds, clientState.streams)
       for (let localIdx = 0; localIdx < cellCount; localIdx++) {
-        const globalIdx = grid.cellOffset + localIdx
-        const viewData = ensureViewEntry(globalIdx)
-        const streamId = viewData.get('streamId')
+        const desiredId = desiredIds[localIdx]
+        if (!desiredId) continue
+        const streamId = fallback?.effectiveId(localIdx, desiredId) ?? desiredId
         const stream = clientState.streams.byId?.get(streamId)
         if (!stream) {
           continue
@@ -1752,7 +1801,14 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   // StreamWindow view updates -> main
   for (const grid of gridRuntimes) {
     grid.window.on('state', (viewStates) => {
-      gridViewState.set(grid.id, viewStates)
+      const fallback = fallbackControllers.get(grid.id)
+      fallback?.observe(viewStates)
+      gridViewState.set(grid.id, viewStates.map((view) => {
+        const originalId = fallback?.originalId(view.context.pos?.spaces[0] ?? -1)
+        return originalId
+          ? { ...view, context: { ...view.context, fallbackOriginalStreamId: originalId } }
+          : view
+      }))
       updateState({})
     })
 

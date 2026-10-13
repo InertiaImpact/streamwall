@@ -87,6 +87,8 @@ export interface ViewState {
     content: ViewContent | null
     info: ContentViewInfo | null
     pos: ViewPos | null
+    /** Temporary replacement; the saved assignment still points to this stream. */
+    fallbackOriginalStreamId?: string
   }
 }
 

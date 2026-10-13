@@ -151,3 +151,8 @@ json-url = []
 [performance]
 # Use more CPU to avoid hardware video decoder contention on large grids.
 software-video-decode = false
+
+[recovery]
+# After three failed starts, temporarily show the nearest unassigned camera.
+# The original is checked in a bounded background player and restored when ready.
+nearby-fallback = false

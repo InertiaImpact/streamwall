@@ -51,6 +51,24 @@ the default hardware decode path. For a frame-rate
 comparison, add `--media-health-log` to write rolling samples to
 `%APPDATA%\Streamwall\media-health.jsonl`.
 
+### Nearby camera recovery
+
+The setup window can enable **Use the nearest available camera after three
+failed starts**. The equivalent `config.toml` setting is:
+
+```toml
+[recovery]
+nearby-fallback = true
+```
+
+This applies to geolocated video and HDHomeRun sources. After three failed
+starts of the assigned stream, Streamwall tries the nearest camera that is not
+already assigned on that grid. Failed alternatives are skipped. The saved
+layout retains the original stream. While a replacement plays, Streamwall
+checks the original in a muted background player (at most two checks across
+all grids) and restores it after playback starts. The feature is off by
+default; set `nearby-fallback = false` to disable it.
+
 ## Data sources
 
 Streamwall can load stream data from both JSON APIs and TOML files. Data sources can be specified in a config file (see `example.config.toml` for an example) or the command line:

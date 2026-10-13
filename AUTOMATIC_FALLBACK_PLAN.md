@@ -1,6 +1,8 @@
 # Location-based stream fallback
 
-Status: design proposal on `performance-updates`; no automatic replacement code is enabled.
+Status: implemented on `performance-updates` behind the opt-in
+`[recovery] nearby-fallback = true` setting. The remote machine has not been
+updated with this version.
 
 ## Why this needs a separate change
 
@@ -25,9 +27,9 @@ Use serial candidate startup and a bounded recovery probe for the original.
 The substitute remains visible while recovery is checked. Do not keep a pool
 of hidden video decoders running.
 
-## Proposed behavior
+## Implemented behavior
 
-1. Make the feature opt-in per grid, default off. Keep the stored layout's
+1. Make the feature opt-in for the app, default off. Keep the stored layout's
    stream ID as the **desired** stream; track an **effective** stream separately
    for playback. Manual assignment or layout load cancels pending fallback.
 2. Count an app-level failed start when a view reaches `error` or fails to
@@ -43,22 +45,20 @@ of hidden video decoders running.
    candidates in a recent failure cooldown. Include sources with unknown list
    status because playback is the authoritative check. Streams without valid
    coordinates keep the current error/retry behavior.
-4. Start one candidate at a time through the existing startup scheduler. If
+4. Start one candidate at a time per failed view through the existing startup scheduler. If
    it fails, apply a cooldown and try the next closest. Reserve a candidate
    while it is loading so two failed tiles cannot claim it. Release the
    reservation when it fails or the tile's desired assignment changes. If the
-   list is exhausted, retain a visible failure state and retry the search on
-   a bounded schedule, without a tight loop.
-5. While a backup plays, probe the desired source with a global limit of one
-   or two concurrent probes and exponential backoff. For HLS, first check a
-   fresh playlist and media segment; then make a muted, short playback attempt
-   before restoring. Keep the backup visible until the original renders.
-   An HDHomeRun probe must also respect tuner limits; web pages need a
-   separate readiness contract before they can use automatic restoration.
-6. Show the backup label, original label, and distance on the tile and in
-   control diagnostics. A manual refresh may retry the desired stream now;
-   manual source selection always wins. Save/export still records only the
-   desired stream.
+   list is exhausted, retry the desired source on a bounded schedule without
+   a tight loop.
+5. While a backup plays, try the desired source in a muted, offscreen player.
+   At most two such probes run across all grids. A probe must reach `running`
+   and advance video time before it can replace the backup. Failed probes use
+   exponential backoff. The backup remains visible until the verified view is
+   promoted into its position.
+6. Mark the replacement in the grid overlay and control UI; log the original,
+   replacement, and distance. Manual source selection always wins. Save/export
+   still records only the desired stream.
 
 ## Boundaries and acceptance checks
 

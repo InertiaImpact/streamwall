@@ -91,6 +91,9 @@ function Overlay({
         const data = content.streamId
           ? streamsById.get(content.streamId)
           : streamsByUrl.get(content.url)?.[0]
+        const original = context.fallbackOriginalStreamId
+          ? streamsById.get(context.fallbackOriginalStreamId)
+          : undefined
         const isListening = matchesState(
           'displaying.running.audio.listening',
           state,
@@ -132,6 +135,7 @@ function Overlay({
                 >
                   <StreamIcon url={content.url} />
                   <span>
+                    {original && <span title={`Temporary replacement for ${original.label ?? original.source ?? 'camera'}`}>↪ </span>}
                     {data.label ? (
                       data.label
                     ) : (

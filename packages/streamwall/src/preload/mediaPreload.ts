@@ -193,6 +193,39 @@ function startMediaHealthSampling(video: HTMLVideoElement) {
   })
 }
 
+function startPlaybackWatchdog(video: HTMLVideoElement) {
+  let lastTime = video.currentTime
+  let lastProgress = Date.now()
+  const timer = window.setInterval(() => {
+    const current = video.currentTime
+    if (Math.abs(current - lastTime) >= 0.1) {
+      lastTime = current
+      lastProgress = Date.now()
+      return
+    }
+    if (Date.now() - lastProgress >= 60_000) {
+      window.clearInterval(timer)
+      ipcRenderer.send('view-error', { error: 'Video made no playback progress for 60 seconds' })
+    }
+  }, 10_000)
+  window.addEventListener('beforeunload', () => window.clearInterval(timer), { once: true })
+}
+
+function reportFirstPlaybackProgress(video: HTMLVideoElement) {
+  let previousTime = video.currentTime
+  const onTimeUpdate = () => {
+    const currentTime = video.currentTime
+    if (video.videoWidth > 0 && Math.abs(currentTime - previousTime) >= 0.1) {
+      video.removeEventListener('timeupdate', onTimeUpdate)
+      ipcRenderer.send('view-playback-started')
+    }
+    previousTime = currentTime
+  }
+  video.addEventListener('timeupdate', onTimeUpdate)
+  window.addEventListener('beforeunload', () =>
+    video.removeEventListener('timeupdate', onTimeUpdate), { once: true })
+}
+
 const pageReady = new Promise((resolve) =>
   document.addEventListener('DOMContentLoaded', resolve, { once: true }),
 )
@@ -436,7 +469,7 @@ async function main() {
   const viewInit = ipcRenderer.invoke('view-init')
   const pageReady = new Promise((resolve) => process.once('loaded', resolve))
 
-  const [{ content, options: initialOptions, mediaHealthEnabled }] = await Promise.all([
+  const [{ content, options: initialOptions, mediaHealthEnabled, nearbyFallbackEnabled }] = await Promise.all([
     viewInit,
     pageReady,
   ])
@@ -463,6 +496,12 @@ async function main() {
       cropController = new CropController(video)
       if (mediaHealthEnabled) {
         startMediaHealthSampling(video)
+      }
+      if (nearbyFallbackEnabled) {
+        reportFirstPlaybackProgress(video)
+      }
+      if (nearbyFallbackEnabled && !isLocalHlsPlayer) {
+        startPlaybackWatchdog(video)
       }
     }
     ipcRenderer.send('view-info', { info })

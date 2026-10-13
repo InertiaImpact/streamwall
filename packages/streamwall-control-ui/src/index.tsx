@@ -2007,6 +2007,10 @@ export function ControlUI({
                           <GridControls
                             idx={pos.spaces[0]}
                             streamId={streamId}
+                            playbackStreamId={state.context.content?.streamId ?? streamId}
+                            backupStreamLabel={state.context.fallbackOriginalStreamId
+                              ? streams.find((item) => item._id === state.context.content?.streamId)?.label ?? 'nearby camera'
+                              : undefined}
                             style={{
                               left: `${(100 * pos.x) / windowWidth}%`,
                               top: `${(100 * pos.y) / windowHeight}%`,
@@ -2895,6 +2899,8 @@ function GridInput({
 function GridControls({
   idx,
   streamId,
+  playbackStreamId,
+  backupStreamLabel,
   style,
   scale,
   isDisplaying,
@@ -2922,6 +2928,8 @@ function GridControls({
 }: {
   idx: number
   streamId: string
+  playbackStreamId: string
+  backupStreamLabel?: string
   style: JSX.HTMLAttributes['style']
   scale?: number
   isDisplaying: boolean
@@ -2977,12 +2985,12 @@ function GridControls({
   )
   const handleSwapClick = useCallback(() => onSwapView(idx), [idx, onSwapView])
   const handleRotateClick = useCallback(
-    () => onRotateView(streamId),
-    [streamId, onRotateView],
+    () => onRotateView(playbackStreamId),
+    [playbackStreamId, onRotateView],
   )
   const handleBrowseClick = useCallback(
-    () => onBrowse(streamId),
-    [streamId, onBrowse],
+    () => onBrowse(playbackStreamId),
+    [playbackStreamId, onBrowse],
   )
   const handleClearClick = useCallback(
     () => {
@@ -2997,7 +3005,13 @@ function GridControls({
   )
   const controlScale = Math.min(1, Math.max(0.7, scale ?? 1))
   return (
-    <StyledGridControlsContainer style={style} onMouseDown={onMouseDown}>
+    <StyledGridControlsContainer style={style} onMouseDown={onMouseDown}
+      title={backupStreamLabel ? `Temporarily playing ${backupStreamLabel}` : undefined}>
+      {backupStreamLabel && <span style={{ position: 'absolute', top: '4px', left: '50%',
+        transform: 'translateX(-50%)', background: '#8a5200', color: 'white',
+        padding: '2px 5px', borderRadius: '3px', fontSize: '10px',
+        pointerEvents: 'none', whiteSpace: 'nowrap', maxWidth: '80%', overflow: 'hidden',
+        textOverflow: 'ellipsis' }}>↪ {backupStreamLabel}</span>}
       {isDisplaying && (
         <StyledGridButtons side="left">
           {showDebug ? (
@@ -3052,10 +3066,10 @@ function GridControls({
       <StyledGridButtons side="right">
         {onSpotlight && roleCan(role, 'set-listening-view') && (
           <StyledButton
-            onClick={() => onSpotlight(streamId)}
+            onClick={() => onSpotlight(playbackStreamId)}
             tabIndex={1}
             title="Spotlight stream (click to close)"
-            isActive={spotlightedStreamId === streamId}
+            isActive={spotlightedStreamId === playbackStreamId}
             activeColor="red"
             $scale={controlScale}
           >

@@ -260,6 +260,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   backgroundView: WebContentsView
   overlayView: WebContentsView
   views: Map<number, ViewActor>
+  private probeViews = new Map<number, ViewActor>()
+  private promotableProbeIds = new Set<number>()
+  private probePlaybackStarted = new Set<number>()
+  private probePlaybackWaiters = new Map<number, () => void>()
   refreshInProgress: Promise<void> | null = null
   debugLogs: StreamwallDebugLogEntry[] = []
   nextDebugLogId = 1
@@ -271,6 +275,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   static senderToWindow = new Map<number, StreamWindow>()
   static nextHlsMediaSessionPool = 0
   static mediaHealthEnabled = false
+  static nearbyFallbackEnabled = false
   static mediaHealthWindows = new Set<StreamWindow>()
   static mediaHealthWrite = Promise.resolve()
 
@@ -450,11 +455,15 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     ipcMain.handle('view-init', async (ev) => {
       const inst = StreamWindow.senderToWindow.get(ev.sender.id)
       if (!inst) return
-      const view = inst.views.get(ev.sender.id)
+      const view = inst.findActor(ev.sender.id)
       if (view) {
         view.send({ type: 'VIEW_INIT' })
         const { content, options } = view.getSnapshot().context
-        return { content, options, mediaHealthEnabled: StreamWindow.mediaHealthEnabled }
+        return {
+          content, options,
+          mediaHealthEnabled: StreamWindow.mediaHealthEnabled,
+          nearbyFallbackEnabled: StreamWindow.nearbyFallbackEnabled,
+        }
       }
     })
 
@@ -462,7 +471,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       'hls-request-acquire',
       async (ev, value: unknown): Promise<HlsRequestAcquireResult> => {
         const inst = StreamWindow.senderToWindow.get(ev.sender.id)
-        if (!inst || !inst.views.has(ev.sender.id)) {
+        if (!inst || !inst.findActor(ev.sender.id)) {
           return {
             admitted: false,
             reason: 'unauthorized',
@@ -510,7 +519,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       const inst = StreamWindow.senderToWindow.get(ev.sender.id)
       const source = asRecord(value)
       const requestId = source?.requestId
-      if (!inst || !inst.views.has(ev.sender.id)) return
+      if (!inst || !inst.findActor(ev.sender.id)) return
       if (!Number.isSafeInteger(requestId)) return
       hlsRequestScheduler.cancel(ev.sender.id, requestId as number)
     })
@@ -518,7 +527,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     ipcMain.on('hls-request-release', (ev, value: unknown) => {
       const inst = StreamWindow.senderToWindow.get(ev.sender.id)
       const request = parseHlsReleaseInput(value)
-      if (!inst || !inst.views.has(ev.sender.id) || !request) return
+      if (!inst || !inst.findActor(ev.sender.id) || !request) return
       hlsRequestScheduler.release(
         ev.sender.id,
         request.permitId,
@@ -530,14 +539,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       hlsStartupScheduler.release(ev.sender.id)
       StreamWindow.senderToWindow
         .get(ev.sender.id)
-        ?.views.get(ev.sender.id)
+        ?.findActor(ev.sender.id)
         ?.send?.({ type: 'VIEW_LOADED' })
     })
 
     ipcMain.on('view-info', (ev, { info }) => {
       StreamWindow.senderToWindow
         .get(ev.sender.id)
-        ?.views.get(ev.sender.id)
+        ?.findActor(ev.sender.id)
         ?.send?.({ type: 'VIEW_INFO', info })
     })
 
@@ -546,13 +555,17 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       if (!inst) return
       hlsStartupScheduler.release(ev.sender.id)
       inst.recordRendererLog(ev.sender.id, error)
-      inst.views.get(ev.sender.id)?.send?.({ type: 'VIEW_ERROR', error })
+      inst.findActor(ev.sender.id)?.send?.({ type: 'VIEW_ERROR', error })
     })
 
     ipcMain.on('view-debug-log', (ev, { log }) => {
       StreamWindow.senderToWindow
         .get(ev.sender.id)
         ?.recordRendererLog(ev.sender.id, log)
+    })
+
+    ipcMain.on('view-playback-started', (ev) => {
+      StreamWindow.senderToWindow.get(ev.sender.id)?.markProbePlaybackStarted(ev.sender.id)
     })
 
     ipcMain.on('view-media-health', (ev, value: unknown) => {
@@ -693,7 +706,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       this.hlsRequestTelemetry.set(event.host, bucket)
     }
 
-    const context = this.views.get(senderId)?.getSnapshot().context
+    const context = this.findActor(senderId)?.getSnapshot().context
     bucket.sampleURL ??= redactDebugURL(context?.content?.url)
     if (event.type === 'queued') {
       bucket.requests += 1
@@ -762,7 +775,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
 
   recordRendererLog(senderId: number, value: unknown) {
     const source = asRecord(value) ?? {}
-    const view = this.views.get(senderId)
+    const view = this.findActor(senderId)
     const context = view?.getSnapshot().context
     const isFatal = source.type === 'streamwall:hls-fatal'
     const rawEvent = isFatal ? source.reason : source.event
@@ -849,6 +862,94 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     }
   }
 
+  private findActor(viewId: number) {
+    return this.views.get(viewId) ?? this.probeViews.get(viewId)
+  }
+
+  private markProbePlaybackStarted(viewId: number) {
+    if (!this.probeViews.has(viewId)) return
+    this.probePlaybackStarted.add(viewId)
+    this.probePlaybackWaiters.get(viewId)?.()
+  }
+
+  private forgetProbe(viewId: number) {
+    this.probeViews.delete(viewId)
+    this.promotableProbeIds.delete(viewId)
+    this.probePlaybackStarted.delete(viewId)
+    this.probePlaybackWaiters.delete(viewId)
+  }
+
+  private closeProbe(viewId: number) {
+    const actor = this.probeViews.get(viewId)
+    if (!actor) return
+    this.forgetProbe(viewId)
+    const view = actor.getSnapshot().context.view
+    hlsStartupScheduler.cancel(viewId)
+    if (!this.win.isDestroyed()) {
+      try { this.win.contentView.removeChildView(view) } catch { /* already detached */ }
+    }
+    if (!view.webContents.isDestroyed()) {
+      view.webContents.close()
+    }
+  }
+
+  /** Verify playback in a single offscreen view; the caller must promote or close it. */
+  async warmStream(stream: StreamData, timeoutMs = 75_000, signal?: AbortSignal): Promise<number | null> {
+    if (this.win.isDestroyed() || signal?.aborted) return null
+    const content: ViewContent = {
+      url: stream.link,
+      kind: stream.kind || 'video',
+      streamId: stream._id,
+    }
+    const actor = this.createView(content)
+    const viewId = actor.getSnapshot().context.id
+    this.probeViews.set(viewId, actor)
+
+    return new Promise<number | null>((resolve) => {
+      let settled = false
+      const finish = (ready: boolean) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        subscription.unsubscribe()
+        signal?.removeEventListener('abort', onAbort)
+        this.probePlaybackWaiters.delete(viewId)
+        if (!ready) this.closeProbe(viewId)
+        resolve(ready ? viewId : null)
+      }
+      const onAbort = () => finish(false)
+      const checkReady = () => {
+        if (actor.getSnapshot().matches({ displaying: 'running' }) &&
+            this.probePlaybackStarted.has(viewId)) finish(true)
+      }
+      const subscription = actor.subscribe((snapshot) => {
+        if (snapshot.matches({ displaying: 'error' })) finish(false)
+        else checkReady()
+      })
+      const timer = setTimeout(() => finish(false), timeoutMs)
+      this.probePlaybackWaiters.set(viewId, checkReady)
+      signal?.addEventListener('abort', onAbort, { once: true })
+      actor.send({ type: 'OPTIONS', options: getDisplayOptions(stream) })
+      actor.send({
+        type: 'DISPLAY',
+        content,
+        pos: { x: -2, y: -2, width: 1, height: 1, spaces: [] },
+      })
+    })
+  }
+
+  promoteWarmStream(viewId: number) {
+    const probe = this.probeViews.get(viewId)
+    if (!probe?.getSnapshot().matches({ displaying: 'running' }) ||
+        !this.probePlaybackStarted.has(viewId)) return false
+    this.promotableProbeIds.add(viewId)
+    return true
+  }
+
+  discardWarmStream(viewId: number) {
+    this.closeProbe(viewId)
+  }
+
   createView(content?: ViewContent) {
     const { win } = this
     assert(win != null, 'Window must be initialized')
@@ -885,6 +986,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     StreamWindow.registerSender(viewId, this)
     view.webContents.once('destroyed', () => {
       this.mediaHealth.delete(viewId)
+      this.forgetProbe(viewId)
       hlsStartupScheduler.cancel(viewId)
       hlsRequestScheduler.unregisterRenderer(viewId)
       StreamWindow.senderToWindow.delete(viewId)
@@ -917,7 +1019,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       ) {
         this.applySpotlight()
       }
-      this.emitState()
+      if (this.views.has(viewId)) this.emitState()
     })
 
     actor.start()
@@ -949,6 +1051,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     const boxes = boxesFromViewContentMap(cols, rows, viewContentMap)
     const remainingBoxes = new Set(boxes)
     const unusedViews = new Set(views.values())
+    for (const probeId of Array.from(this.promotableProbeIds)) {
+      const warm = this.probeViews.get(probeId)
+      if (warm) unusedViews.add(warm)
+    }
     const viewsToDisplay = []
 
     // We try to find the best match for moving / reusing existing views to match the new positions.
@@ -991,6 +1097,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
           viewsToDisplay.push({ box, view: foundView })
           unusedViews.delete(foundView)
           remainingBoxes.delete(box)
+          this.forgetProbe(foundView.getSnapshot().context.id)
         }
       }
     }
@@ -1040,12 +1147,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     for (const view of unusedViews) {
       const contentView = view.getSnapshot().context.view
       const viewId = contentView.webContents.id
+      this.forgetProbe(viewId)
       win.contentView.removeChildView(contentView)
       hlsStartupScheduler.cancel(viewId)
       contentView.webContents.close()
       StreamWindow.senderToWindow.delete(viewId)
     }
     this.views = newViews
+    this.promotableProbeIds.clear()
     this.applySpotlight()
     this.emitState()
   }
