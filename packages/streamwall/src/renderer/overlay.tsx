@@ -1,6 +1,6 @@
 import Color from 'color'
 import { render } from 'preact'
-import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { useHotkeys } from 'react-hotkeys-hook'
 import {
   FaFacebook,
@@ -40,6 +40,8 @@ function Overlay({
     'preparing' | 'open' | 'closing' | null
   >(null)
   const [frameExpanded, setFrameExpanded] = useState(false)
+  const spotlightFrameRef = useRef<HTMLDivElement>(null)
+  const gridClipRef = useRef<SVGPathElement>(null)
 
   const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
     window.streamwallLayer.spotlight(url, streamId)
@@ -103,10 +105,47 @@ function Overlay({
   const expandedData = expandedContent?.streamId
     ? streamsById.get(expandedContent.streamId)
     : expandedContent?.url ? streamsByUrl.get(expandedContent.url)?.[0] : undefined
+  const spotlightVisible = !!expandedContent && !!expandedPos &&
+    (spotlightPhase === 'open' || spotlightPhase === 'closing')
+
+  useLayoutEffect(() => {
+    if (!spotlightVisible) return
+    const frameElement = spotlightFrameRef.current
+    const clipPath = gridClipRef.current
+    if (!frameElement || !clipPath) return
+
+    // Follow the actual animated frame so grid labels never paint over it.
+    // This loop runs only for the 300 ms spotlight transition.
+    const started = performance.now()
+    let animationFrame = 0
+    const updateClip = () => {
+      const frame = frameElement.getBoundingClientRect()
+      const right = frame.right
+      const bottom = frame.bottom
+      clipPath.setAttribute('d',
+        `M0 0H${window.innerWidth}V${window.innerHeight}H0Z ` +
+        `M${frame.left} ${frame.top}V${bottom}H${right}V${frame.top}Z`,
+      )
+      if (performance.now() - started < 350) {
+        animationFrame = requestAnimationFrame(updateClip)
+      }
+    }
+    updateClip()
+    return () => cancelAnimationFrame(animationFrame)
+  }, [expandedKey, spotlightPhase, frameExpanded, spotlightVisible, width, height])
+
   const overlays = streams.filter((s) => s.kind === 'overlay')
   return (
     <OverlayContainer>
       <VersionFooter />
+      <svg width="0" height="0" aria-hidden="true">
+        <defs>
+          <clipPath id="streamwall-grid-clip" clipPathUnits="userSpaceOnUse">
+            <path ref={gridClipRef} clipRule="evenodd" />
+          </clipPath>
+        </defs>
+      </svg>
+      <GridAnnotations $clipped={spotlightVisible}>
       {activeViews.map(({ state, context }) => {
         const { content, pos } = context
         if (!content || !pos) {
@@ -139,8 +178,8 @@ function Overlay({
         // The spotlight video sits below this transparent overlay. Do not paint
         // the source tile's blur, label, or border over the enlarged video.
         // Its media view is blurred separately while spotlight is visible.
-        const isObscured = spotlightPhase !== 'preparing' &&
-          expandedKey != null
+        const isObscured = spotlightVisible &&
+          expandedKey === (content.streamId ?? content.url)
         return (
           <div key={`${pos.spaces.join('-')}`}>
             <SpaceBorder
@@ -181,8 +220,10 @@ function Overlay({
           </div>
         )
       })}
+      </GridAnnotations>
       {expandedContent && expandedPos && spotlightPhase !== 'preparing' && (
         <SpotlightFrame
+          ref={spotlightFrameRef}
           $pos={expandedPos}
           $expanded={frameExpanded}
           onClick={() => toggleSpotlight(
@@ -296,6 +337,13 @@ function StreamIcon({ url }: { url: string }) {
 
 const OverlayContainer = styled.div`
   overflow: hidden;
+`
+
+const GridAnnotations = styled.div<{ $clipped: boolean }>`
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  clip-path: ${({ $clipped }) => $clipped ? 'url(#streamwall-grid-clip)' : 'none'};
 `
 
 const SpaceBorder = styled.div.attrs(() => ({
