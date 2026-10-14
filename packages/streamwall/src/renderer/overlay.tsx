@@ -134,12 +134,13 @@ function Overlay({
         const isLoading = matchesState('displaying.loading', state)
         const hasTitle = data && (data.label || data.source)
         const position = data?.labelPosition ?? 'top-left'
-        const isExpanded = expandedKey === (content.streamId ?? content.url) &&
-          spotlightPhase !== 'preparing'
         const isPreparing = expandedKey === (content.streamId ?? content.url) &&
           spotlightPhase === 'preparing'
+        // The spotlight video sits below this transparent overlay. Do not paint
+        // the source tile's blur, label, or border over the enlarged video.
+        // Its media view is blurred separately while spotlight is visible.
         const isObscured = spotlightPhase !== 'preparing' &&
-          expandedKey != null && !isExpanded
+          expandedKey != null
         return (
           <div key={`${pos.spaces.join('-')}`}>
             <SpaceBorder
@@ -148,13 +149,11 @@ function Overlay({
               windowHeight={height}
               activeColor={activeColor}
               isListening={isListening}
-              isExpanded={false}
               isObscured={isObscured}
-              isHighlighted={isExpanded}
               onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
-              {!isObscured && (isBlurred || isExpanded) && <BlurCover />}
+              {!isObscured && isBlurred && <BlurCover />}
               {!isObscured && hasTitle && (
                 <StreamTitle
                   position={position}
@@ -305,25 +304,25 @@ const SpaceBorder = styled.div.attrs(() => ({
   display: flex;
   align-items: flex-start;
   position: fixed;
-  left: ${({ pos, isExpanded }) => isExpanded ? '10vw' : `${pos.x}px`};
-  top: ${({ pos, isExpanded }) => isExpanded ? '10vh' : `${pos.y}px`};
-  width: ${({ pos, isExpanded }) => isExpanded ? '80vw' : `${pos.width}px`};
-  height: ${({ pos, isExpanded }) => isExpanded ? '80vh' : `${pos.height}px`};
-  border: 0 solid ${({ isHighlighted }) => (isHighlighted ? '#00ff00' : 'transparent')};
-  border-left-width: ${({ pos, borderWidth, isExpanded, isObscured }) =>
-    (isExpanded || isObscured || pos.x === 0) ? 0 : borderWidth}px;
-  border-right-width: ${({ pos, borderWidth, windowWidth, isExpanded, isObscured }) =>
-    (isExpanded || isObscured || pos.x + pos.width === windowWidth) ? 0 : borderWidth}px;
-  border-top-width: ${({ pos, borderWidth, isExpanded, isObscured }) =>
-    (isExpanded || isObscured || pos.y === 0) ? 0 : borderWidth}px;
-  border-bottom-width: ${({ pos, borderWidth, windowHeight, isExpanded, isObscured }) =>
-    (isExpanded || isObscured || pos.y + pos.height === windowHeight) ? 0 : borderWidth}px;
-  box-shadow: ${({ isListening, activeColor, isExpanded, isObscured }) =>
-    !isObscured && (isListening || isExpanded) ? `0 0 10px ${activeColor} inset` : 'none'};
+  left: ${({ pos }) => `${pos.x}px`};
+  top: ${({ pos }) => `${pos.y}px`};
+  width: ${({ pos }) => `${pos.width}px`};
+  height: ${({ pos }) => `${pos.height}px`};
+  border: 0 solid transparent;
+  border-left-width: ${({ pos, borderWidth, isObscured }) =>
+    (isObscured || pos.x === 0) ? 0 : borderWidth}px;
+  border-right-width: ${({ pos, borderWidth, windowWidth, isObscured }) =>
+    (isObscured || pos.x + pos.width === windowWidth) ? 0 : borderWidth}px;
+  border-top-width: ${({ pos, borderWidth, isObscured }) =>
+    (isObscured || pos.y === 0) ? 0 : borderWidth}px;
+  border-bottom-width: ${({ pos, borderWidth, windowHeight, isObscured }) =>
+    (isObscured || pos.y + pos.height === windowHeight) ? 0 : borderWidth}px;
+  box-shadow: ${({ isListening, activeColor, isObscured }) =>
+    !isObscured && isListening ? `0 0 10px ${activeColor} inset` : 'none'};
   box-sizing: border-box;
   cursor: pointer;
   transition: none;
-  z-index: ${({ isExpanded }) => isExpanded ? 1000 : 1};
+  z-index: 1;
   pointer-events: auto;
   user-select: none;
 `

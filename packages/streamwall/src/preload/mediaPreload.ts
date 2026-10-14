@@ -16,6 +16,20 @@ const isLocalHlsPlayer =
     location.hostname === 'localhost' ||
     location.hostname === '127.0.0.1')
 
+const SPOTLIGHT_BLUR_CLASS = 'streamwall-spotlight-blurred'
+let spotlightBlurred = false
+webFrame.insertCSS(
+  `html.${SPOTLIGHT_BLUR_CLASS} { filter: blur(8px) !important; }`,
+  { cssOrigin: 'user' },
+).catch((error) => console.warn('[spotlight] blur style failed', error))
+const applySpotlightBlur = () =>
+  document.documentElement?.classList.toggle(SPOTLIGHT_BLUR_CLASS, spotlightBlurred)
+ipcRenderer.on('spotlight-blur', (_event, blurred: boolean) => {
+  spotlightBlurred = blurred === true
+  applySpotlightBlur()
+})
+document.addEventListener('DOMContentLoaded', applySpotlightBlur, { once: true })
+
 if (isLocalHlsPlayer) {
   contextBridge.exposeInMainWorld('streamwallHlsRequests', {
     acquire: (request: HlsRequestAcquireInput) =>

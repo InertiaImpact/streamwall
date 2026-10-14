@@ -275,6 +275,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   private spotlightActor: ViewActor | null = null
   private spotlightSourceId: number | null = null
   private spotlightSourceWasBlurred = false
+  private spotlightBlurredSource?: WebContents
+  private spotlightBlurOnLoad?: () => void
   private spotlightPhase: 'preparing' | 'open' | 'closing' | null = null
   private spotlightSubscription?: { unsubscribe(): void }
   private spotlightStartTimer?: NodeJS.Timeout
@@ -1432,6 +1434,15 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         this.win.contentView.children.length - 2,
       )
       view.setBounds(from)
+      const sourceWebContents = sourceSnapshot.context.view.webContents
+      this.spotlightBlurredSource = sourceWebContents
+      this.spotlightBlurOnLoad = () => {
+        if (!sourceWebContents.isDestroyed()) {
+          sourceWebContents.send('spotlight-blur', true)
+        }
+      }
+      sourceWebContents.on('did-finish-load', this.spotlightBlurOnLoad)
+      this.spotlightBlurOnLoad()
       if (!this.spotlightSourceWasBlurred) source.send({ type: 'BLUR' })
       this.syncSpotlightOverlay()
       this.animateSpotlight(view, from, this.spotlightBounds(), () =>
@@ -1502,6 +1513,18 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.spotlightStartTimer = this.spotlightAnimation = undefined
     this.spotlightSubscription?.unsubscribe()
     this.spotlightSubscription = undefined
+    if (this.spotlightBlurredSource) {
+      if (this.spotlightBlurOnLoad) {
+        this.spotlightBlurredSource.removeListener(
+          'did-finish-load', this.spotlightBlurOnLoad,
+        )
+      }
+      if (!this.spotlightBlurredSource.isDestroyed()) {
+        this.spotlightBlurredSource.send('spotlight-blur', false)
+      }
+    }
+    this.spotlightBlurredSource = undefined
+    this.spotlightBlurOnLoad = undefined
     const actor = this.spotlightActor
     const source = this.views.get(this.spotlightSourceId ?? -1)
     const shouldUnblur = !this.spotlightSourceWasBlurred && this.spotlightPhase !== 'preparing'
