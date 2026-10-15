@@ -1947,6 +1947,12 @@ export function ControlUI({
                   if (!isSpot && !data) {
                     return null
                   }
+                  const isBackup = !!state.context.fallbackOriginalStreamId
+                  const playbackData = isBackup
+                    ? streams.find((item) => item._id === state.context.content?.streamId)
+                    : data
+                  const description = playbackData?.label || playbackData?.source ||
+                    (isBackup ? 'nearby camera' : undefined)
 
                   return (
                     <StyledGridPreviewBox
@@ -1971,7 +1977,15 @@ export function ControlUI({
                         <StyledGridLabel $scale={gridScale}>
                           {isSpot ? streamId.toUpperCase() : streamId}
                         </StyledGridLabel>
-                        {!isSpot && <div>{data?.source}</div>}
+                        {!isSpot && description && (
+                          <StyledGridDescription
+                            $scale={gridScale}
+                            $isBackup={isBackup}
+                            title={isBackup ? `Temporarily playing ${description}` : description}
+                          >
+                            {isBackup && '↪ '}{description}
+                          </StyledGridDescription>
+                        )}
                       </StyledGridInfo>
                     </StyledGridPreviewBox>
                   )
@@ -3007,11 +3021,6 @@ function GridControls({
   return (
     <StyledGridControlsContainer style={style} onMouseDown={onMouseDown}
       title={backupStreamLabel ? `Temporarily playing ${backupStreamLabel}` : undefined}>
-      {backupStreamLabel && <span style={{ position: 'absolute', top: '4px', left: '50%',
-        transform: 'translateX(-50%)', background: '#8a5200', color: 'white',
-        padding: '2px 5px', borderRadius: '3px', fontSize: '10px',
-        pointerEvents: 'none', whiteSpace: 'nowrap', maxWidth: '80%', overflow: 'hidden',
-        textOverflow: 'ellipsis' }}>↪ {backupStreamLabel}</span>}
       {isDisplaying && (
         <StyledGridButtons side="left">
           {showDebug ? (
@@ -3884,6 +3893,14 @@ const StyledGridPreviewBox = styled.div.attrs(() => ({
 `
 
 const StyledGridInfo = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 0 6px;
+  box-sizing: border-box;
   text-align: center;
 `
 
@@ -3891,6 +3908,22 @@ const StyledGridLabel = styled.div<{ $scale?: number }>`
   font-size: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
   line-height: ${({ $scale = 1 }) => `${Math.max(10, Math.min(22, Math.round(22 * $scale)))}px`};
   color: #333;
+`
+
+const StyledGridDescription = styled.div<{ $scale?: number; $isBackup: boolean }>`
+  max-width: 100%;
+  box-sizing: border-box;
+  font-size: ${({ $scale = 1 }) => `${Math.max(9, Math.min(14, Math.round(14 * $scale)))}px`};
+  line-height: 1.2;
+  color: ${({ $isBackup }) => $isBackup ? 'white' : '#333'};
+  background: ${({ $isBackup }) => $isBackup ? '#8a5200' : 'transparent'};
+  padding: ${({ $isBackup }) => $isBackup ? '2px 4px' : '0'};
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 `
 
 const StyledGridInputs = styled.div`
