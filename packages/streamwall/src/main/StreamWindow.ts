@@ -284,6 +284,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   private spotlightAnimationGeneration = 0
   private spotlightSnapshot?: string
   private spotlightTransitionStartedAt = 0
+  private latestState?: StreamwallState
   static ipcRegistered = false
   static senderToWindow = new Map<number, StreamWindow>()
   static nextHlsMediaSessionPool = 0
@@ -475,7 +476,16 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       const view = inst.spotlightActor.getSnapshot().context.view
       if (!view.webContents.isDestroyed() && !inst.win.isDestroyed()) {
         // The shrinking snapshot is painted; uncover the grid in one step.
+        inst.win.contentView.removeChildView(view)
         inst.win.contentView.addChildView(view, 0)
+      }
+    })
+
+    ipcMain.on('spotlight-close', (ev) => {
+      const inst = StreamWindow.senderToWindow.get(ev.sender.id)
+      if (inst?.spotlightPhase === 'open' &&
+          ev.sender === inst.spotlightActor?.getSnapshot().context.view.webContents) {
+        inst.setSpotlight(null)
       }
     })
 
@@ -1034,6 +1044,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         id: viewId,
         view,
         win,
+        overlayView: this.overlayView,
       },
     })
 
@@ -1301,8 +1312,10 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   }
 
   onState(state: StreamwallState) {
+    this.latestState = state
     this.overlayView.webContents.send('state', state)
     this.syncSpotlightOverlay()
+    this.syncSpotlightControls()
     this.backgroundView.webContents.send('state', state)
 
     for (const view of this.spotlightActor
@@ -1461,11 +1474,11 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     )
     this.spotlightPhase = 'open'
     try {
-      this.win.contentView.addChildView(
-        view,
-        this.win.contentView.children.length - 2,
-      )
+      // Native stacking: grid media -> grid labels -> enlarged video.
+      this.win.contentView.addChildView(view)
+      view.setBackgroundColor('#000000')
       view.setBounds(this.spotlightBounds())
+      this.syncSpotlightControls()
       const sourceWebContents = sourceSnapshot.context.view.webContents
       this.spotlightBlurredSource = sourceWebContents
       this.spotlightBlurOnLoad = () => {
@@ -1554,6 +1567,20 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     })
   }
 
+  private syncSpotlightControls() {
+    if (this.spotlightPhase !== 'open' || !this.spotlightActor) return
+    const { view, content, info } = this.spotlightActor.getSnapshot().context
+    if (!content || view.webContents.isDestroyed()) return
+    const state = this.latestState
+    const stream = state?.streams.find((item) => content.streamId
+      ? item._id === content.streamId : item.link === content.url)
+    view.webContents.send('spotlight-controls', {
+      label: stream?.label || stream?.source || info?.title || '',
+      labelPosition: stream?.labelPosition ?? 'top-left',
+      fontSize: state?.overlayLabelFontSize ?? 16,
+    })
+  }
+
   private findSpotlightView(token = this.spotlightToken) {
     if (!token) return undefined
     return Array.from(this.views.values()).find((view) => {
@@ -1580,7 +1607,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         !this.spotlightActor || this.win.isDestroyed()) return
     const view = this.spotlightActor.getSnapshot().context.view
     if (!view.webContents.isDestroyed()) {
-      this.win.contentView.addChildView(view, this.win.contentView.children.length - 2)
+      this.win.contentView.addChildView(view)
       view.setBounds(this.spotlightBounds())
     }
   }

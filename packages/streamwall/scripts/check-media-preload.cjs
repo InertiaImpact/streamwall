@@ -52,6 +52,8 @@ fs.writeFileSync(path.join(scratch, 'playHLS.html'), fixture)
 fs.writeFileSync(path.join(scratch, 'web.html'), '<!doctype html><title>Web check</title><body>Web source</body>')
 
 const pending = new Map()
+const closed = new Set()
+ipcMain.on('spotlight-close', (event) => closed.add(event.sender.id))
 ipcMain.handle('view-init', (event) => ({
   content: { kind: pending.get(event.sender.id).kind },
   options: {}, mediaHealthEnabled: false, nearbyFallbackEnabled: false,
@@ -104,10 +106,23 @@ async function check({ name, kind, file, bridge = false }) {
     await waitForRenderer(contents, "getComputedStyle(document.documentElement).filter === 'blur(8px)'")
     contents.send('spotlight-blur', false)
     await waitForRenderer(contents, "getComputedStyle(document.documentElement).filter === 'none'")
-    console.log(`PASS ${name}: ready, playback/bridge, blur and restore`)
+    contents.send('spotlight-controls', { label: 'Enlarged test feed', labelPosition: 'bottom-right', fontSize: 20 })
+    await waitForRenderer(contents, "document.querySelector('#streamwall-spotlight-controls > span')?.textContent === 'Enlarged test feed'")
+    const controls = await contents.executeJavaScript(`(() => {
+      const root=document.getElementById('streamwall-spotlight-controls'), title=root.firstElementChild;
+      return { display:getComputedStyle(root).display, position:getComputedStyle(root).position,
+        titleDisplay:getComputedStyle(title).display, bottom:getComputedStyle(title).bottom,
+        right:getComputedStyle(title).right, font:getComputedStyle(title).fontSize };
+    })()`)
+    assert.deepEqual(controls, { display: 'block', position: 'fixed', titleDisplay: 'block', bottom: '10px', right: '10px', font: '20px' })
+    await contents.executeJavaScript("document.getElementById('streamwall-spotlight-controls').click()")
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.ok(closed.has(contents.id), 'Enlarged player click must request close')
+    console.log(`PASS ${name}: ready, playback/bridge, blur/restore, enlarged title and close`)
   } finally {
     clearTimeout(timeout)
     pending.delete(contents.id)
+    closed.delete(contents.id)
     win.destroy()
   }
 }

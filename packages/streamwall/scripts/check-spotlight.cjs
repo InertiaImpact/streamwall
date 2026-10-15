@@ -113,60 +113,27 @@ app.whenReady().then(async () => {
   assert.ok(boundsChanges.length <= 3, `Repeated native resizing: ${boundsChanges.length} updates`)
   assert.equal(navigations, 1, 'Spotlight must not restart the original stream')
 
-  // Pixel checks catch the reported bug even when DOM labels still exist.
-  // A hidden standalone window submits a capture surface even when native
-  // child views do not. Render the same built overlay and IPC state there.
-  const overlayWindow = new BrowserWindow({
-    width: 1120, height: 630, useContentSize: true, show: false,
-    backgroundColor: '#ffffff', webPreferences: {
-      preload: path.join(scratch, 'layerPreload.js'), contextIsolation: true,
-      backgroundThrottling: false,
-    },
-  })
-  const overlay = overlayWindow.webContents
-  const nativeOverlay = grid.overlayView
-  grid.overlayView = { webContents: overlay }
-  StreamWindow.registerSender(overlay.id, grid)
-  await overlay.loadFile(path.join(root, '.vite/renderer/main_window/src/renderer/overlay.html'))
-  await until(() => overlay.executeJavaScript("document.body.textContent.includes('GRID LABEL 29')"), 'visual overlay')
-  await pause(400)
-  grid.overlayView = nativeOverlay
-  const capture = await overlay.capturePage()
-  fs.writeFileSync(path.join(scratch, 'overlay.png'), capture.toPNG())
-  const pixels = capture.toBitmap()
-  const imageWidth = capture.getSize().width
-  const imageHeight = capture.getSize().height
-  const regions = await overlay.executeJavaScript(`['GRID LABEL 0','GRID LABEL 29'].map(text => {
-    const el=[...document.querySelectorAll('span')].find(e=>e.textContent===text);
-    return el.getBoundingClientRect().toJSON();
-  })`)
-  function hasDarkPixels(rect) {
-    const sx = imageWidth / 1120, sy = imageHeight / 630
-    for (let y = Math.ceil((rect.top + 2) * sy); y < (rect.bottom - 2) * sy; y++) {
-      for (let x = Math.ceil((rect.left + 2) * sx); x < (rect.right - 2) * sx; x++) {
-        const i = (y * imageWidth + x) * 4
-        if (pixels[i + 3] && pixels[i] < 220 && pixels[i + 1] < 220 && pixels[i + 2] < 220) return true
-      }
-    }
-    return false
+  function assertNativeStack() {
+    const children = grid.win.contentView.children
+    const sourceIndex = children.indexOf(source.getSnapshot().context.view)
+    const labelsIndex = children.indexOf(grid.overlayView)
+    const spotlightIndex = children.indexOf(duplicate)
+    assert.ok(sourceIndex >= 0 && sourceIndex < labelsIndex, 'Grid media must remain below labels')
+    assert.ok(labelsIndex < spotlightIndex, 'Enlarged video must be ABOVE the native label surface')
+    assert.equal(children.at(-1), duplicate, 'Enlarged video must be the topmost native surface')
   }
-  assert.ok(hasDarkPixels(regions[0]), 'Labels outside spotlight must remain visible')
-  assert.ok(!hasDarkPixels(regions[1]), 'Grid labels must not paint across spotlight')
-  const frameBounds = await overlay.executeJavaScript(`(() => {
-    const title=[...document.querySelectorAll('span')].find(e=>e.textContent==='GRID LABEL 24');
-    return title.parentElement.parentElement.getBoundingClientRect().toJSON();
-  })()`)
-  assert.ok(Math.abs(frameBounds.x - 112) < 1 && Math.abs(frameBounds.width - 896) < 1,
-    'Live spotlight chrome must reach its final size even without renderer animation frames')
-  overlay.send('state', { ...state, views: state.views.map((view) =>
-    view.context.content?.streamId === content.streamId
-      ? { ...view, state: { displaying: 'error' } } : view) })
-  await pause(100)
-  assert.equal(await overlay.executeJavaScript(
-    "[...document.querySelectorAll('span')].some(e=>e.textContent==='GRID LABEL 24')"), true,
-  'A source-tile error must not remove the healthy spotlight frame and label mask')
-
-  grid.toggleSpotlight(content.url, content.streamId)
+  assertNativeStack()
+  source.send({ type: 'DISPLAY', content, pos: { ...pos, x: pos.x + 1 } })
+  assertNativeStack()
+  source.send({ type: 'DISPLAY', content, pos })
+  grid.applySpotlight()
+  assertNativeStack()
+  assert.equal(await grid.overlayView.webContents.executeJavaScript(
+    "document.querySelector('clipPath') === null"), true, 'No label-clipping workaround')
+  await until(() => duplicate.webContents.executeJavaScript(
+    "document.querySelector('#streamwall-spotlight-controls > span')?.textContent === 'GRID LABEL 24'"),
+  'title inside enlarged native surface')
+  await duplicate.webContents.executeJavaScript("document.getElementById('streamwall-spotlight-controls').click()")
   await until(() => grid.spotlightPhase === null, 'close animation cleanup')
   assert.equal(grid.spotlightActor, null)
   assert.equal(source.getSnapshot().matches('displaying.running.video.normal'), true)
@@ -176,6 +143,6 @@ app.whenReady().then(async () => {
   await until(() => grid.spotlightPhase === null, 'rapid cancel cleanup')
   assert.equal(grid.spotlightActor, null)
   assert.equal(grid.views.size, 1)
-  console.log(`PASS spotlight: preview ${previewMs}ms, ${boundsChanges.length} native bounds updates; outside labels visible, inside labels clipped, source preserved, close/cancel cleaned up`)
+  console.log(`PASS spotlight: preview ${previewMs}ms, ${boundsChanges.length} initial native bounds updates; native video above labels, grid below labels after reposition, player title/click-to-close, source preserved, cancel cleaned up`)
   app.exit(0)
 }).catch((error) => { console.error('FAIL spotlight:', error); app.exit(1) })

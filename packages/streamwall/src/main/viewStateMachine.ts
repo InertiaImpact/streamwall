@@ -42,12 +42,14 @@ const viewStateMachine = setup({
       id: number
       view: WebContentsView
       win: BrowserWindow
+      overlayView: WebContentsView
     },
 
     context: {} as {
       id: number
       win: BrowserWindow
       view: WebContentsView
+      overlayView: WebContentsView
       pos: ViewPos | null
       content: ViewContent | null
       options: ContentDisplayOptions | null
@@ -117,6 +119,7 @@ const viewStateMachine = setup({
         return
       }
       try {
+        win.contentView.removeChildView(view)
         win.contentView.addChildView(view, 0) // Insert below background (so hidden by background)
         const { width, height } = win.getBounds()
         view.setBounds({ x: 0, y: 0, width, height })
@@ -126,7 +129,7 @@ const viewStateMachine = setup({
     },
 
     positionView: ({ context }) => {
-      const { pos, view, win } = context
+      const { pos, view, win, overlayView } = context
 
       if (!pos) {
         return
@@ -138,7 +141,11 @@ const viewStateMachine = setup({
       }
 
       try {
-        win.contentView.addChildView(view, win.contentView.children.length - 2) // Insert below overlay but above background
+        // Remove first: re-adding an existing child can promote it to the top.
+        // Anchor grid media below its label surface, even with spotlight above it.
+        win.contentView.removeChildView(view)
+        const overlayIndex = win.contentView.children.indexOf(overlayView)
+        win.contentView.addChildView(view, overlayIndex < 0 ? 0 : overlayIndex)
         view.setBounds(pos)
       } catch (err) {
         console.warn('[view] positionView failed; view/window destroyed?', err)
@@ -249,10 +256,11 @@ const viewStateMachine = setup({
 }).createMachine({
   id: 'view',
   initial: 'empty',
-  context: ({ input: { id, view, win } }) => ({
+  context: ({ input: { id, view, win, overlayView } }) => ({
     id,
     view,
     win,
+    overlayView,
     pos: null,
     content: null,
     options: null,

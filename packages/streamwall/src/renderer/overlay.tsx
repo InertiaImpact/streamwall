@@ -90,7 +90,7 @@ function Overlay({
       !matchesState('displaying.error', state),
   )
   // A healthy enlarged player can outlive a reload/error in its source tile.
-  // Keep its frame and label mask until the main process ends spotlight.
+  // Keep its transition state until the main process ends spotlight.
   const expandedView = views.find(({ context }) =>
     expandedKey === (context.content?.streamId ?? context.content?.url),
   )
@@ -106,14 +106,7 @@ function Overlay({
   return (
     <OverlayContainer>
       <VersionFooter />
-      <svg width="0" height="0" aria-hidden="true">
-        <defs>
-          <clipPath id="streamwall-grid-clip" clipPathUnits="objectBoundingBox">
-            <path clipRule="evenodd" d="M0 0H1V1H0Z M.1 .1V.9H.9V.1Z" />
-          </clipPath>
-        </defs>
-      </svg>
-      <GridAnnotations $clipped={spotlightVisible}>
+      <GridAnnotations>
       {activeViews.map(({ state, context }) => {
         const { content, pos } = context
         if (!content || !pos) {
@@ -143,9 +136,8 @@ function Overlay({
         const position = data?.labelPosition ?? 'top-left'
         const isPreparing = expandedKey === (content.streamId ?? content.url) &&
           spotlightPhase === 'preparing' && !spotlightVisible
-        // The spotlight video sits below this transparent overlay. Do not paint
-        // the source tile's blur, label, or border over the enlarged video.
-        // Its media view is blurred separately while spotlight is visible.
+        // Its media view supplies the blur; the enlarged native surface sits
+        // above this entire label layer.
         const isObscured = spotlightVisible &&
           expandedKey === (content.streamId ?? content.url)
         return (
@@ -189,7 +181,7 @@ function Overlay({
         )
       })}
       </GridAnnotations>
-      {expandedContent && expandedPos && spotlightVisible && (
+      {expandedContent && expandedPos && spotlightVisible && spotlightPhase !== 'open' && (
         <SpotlightFrame
           key={expandedKey}
           $phase={spotlightPhase}
@@ -322,11 +314,10 @@ const OverlayContainer = styled.div`
   overflow: hidden;
 `
 
-const GridAnnotations = styled.div<{ $clipped: boolean }>`
+const GridAnnotations = styled.div`
   position: fixed;
   inset: 0;
   pointer-events: none;
-  clip-path: ${({ $clipped }) => $clipped ? 'url(#streamwall-grid-clip)' : 'none'};
 `
 
 const SpaceBorder = styled.div.attrs(() => ({
