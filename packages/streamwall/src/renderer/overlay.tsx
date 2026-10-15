@@ -1,6 +1,6 @@
 import Color from 'color'
 import { render } from 'preact'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks'
+import { useCallback, useEffect, useMemo, useState } from 'preact/hooks'
 import { useHotkeys } from 'react-hotkeys-hook'
 import {
   FaFacebook,
@@ -12,7 +12,7 @@ import {
 } from 'react-icons/fa'
 import { RiKickFill, RiTwitterXFill } from 'react-icons/ri'
 import { StreamwallState } from 'streamwall-shared'
-import { styled } from 'styled-components'
+import { keyframes, styled } from 'styled-components'
 import { TailSpin } from 'svg-loaders-react'
 import { matchesState } from 'xstate'
 import packageInfo from '../../package.json'
@@ -39,9 +39,7 @@ function Overlay({
   const [spotlightPhase, setSpotlightPhase] = useState<
     'preparing' | 'open' | 'closing' | null
   >(null)
-  const [frameExpanded, setFrameExpanded] = useState(false)
-  const spotlightFrameRef = useRef<HTMLDivElement>(null)
-  const gridClipRef = useRef<SVGPathElement>(null)
+  const [spotlightSnapshot, setSpotlightSnapshot] = useState<string | undefined>()
 
   const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
     window.streamwallLayer.spotlight(url, streamId)
@@ -55,11 +53,13 @@ function Overlay({
         url?: string,
         streamId?: string,
         phase?: 'preparing' | 'open' | 'closing' | null,
+        snapshot?: string,
       ) => {
         console.debug('Received spotlight message for URL:', url, streamId)
         setExpandedUrl(url)
         setExpandedStreamId(streamId)
         setSpotlightPhase(phase ?? null)
+        setSpotlightSnapshot(snapshot)
       },
     )
     return unsubscribe
@@ -83,21 +83,15 @@ function Overlay({
   }, [streams])
   
   const expandedKey = expandedStreamId ?? expandedUrl
-  useEffect(() => {
-    if (spotlightPhase !== 'open') {
-      setFrameExpanded(false)
-      return
-    }
-    const frame = requestAnimationFrame(() => setFrameExpanded(true))
-    return () => cancelAnimationFrame(frame)
-  }, [expandedKey, spotlightPhase])
   
   const activeViews = views.filter(
     ({ state }) =>
       matchesState('displaying', state) &&
       !matchesState('displaying.error', state),
   )
-  const expandedView = activeViews.find(({ context }) =>
+  // A healthy enlarged player can outlive a reload/error in its source tile.
+  // Keep its frame and label mask until the main process ends spotlight.
+  const expandedView = views.find(({ context }) =>
     expandedKey === (context.content?.streamId ?? context.content?.url),
   )
   const expandedContent = expandedView?.context.content
@@ -106,33 +100,7 @@ function Overlay({
     ? streamsById.get(expandedContent.streamId)
     : expandedContent?.url ? streamsByUrl.get(expandedContent.url)?.[0] : undefined
   const spotlightVisible = !!expandedContent && !!expandedPos &&
-    (spotlightPhase === 'open' || spotlightPhase === 'closing')
-
-  useLayoutEffect(() => {
-    if (!spotlightVisible) return
-    const frameElement = spotlightFrameRef.current
-    const clipPath = gridClipRef.current
-    if (!frameElement || !clipPath) return
-
-    // Follow the actual animated frame so grid labels never paint over it.
-    // This loop runs only for the 300 ms spotlight transition.
-    const started = performance.now()
-    let animationFrame = 0
-    const updateClip = () => {
-      const frame = frameElement.getBoundingClientRect()
-      const right = frame.right
-      const bottom = frame.bottom
-      clipPath.setAttribute('d',
-        `M0 0H${window.innerWidth}V${window.innerHeight}H0Z ` +
-        `M${frame.left} ${frame.top}V${bottom}H${right}V${frame.top}Z`,
-      )
-      if (performance.now() - started < 350) {
-        animationFrame = requestAnimationFrame(updateClip)
-      }
-    }
-    updateClip()
-    return () => cancelAnimationFrame(animationFrame)
-  }, [expandedKey, spotlightPhase, frameExpanded, spotlightVisible, width, height])
+    spotlightPhase != null && (spotlightPhase !== 'preparing' || !!spotlightSnapshot)
 
   const overlays = streams.filter((s) => s.kind === 'overlay')
   return (
@@ -140,8 +108,8 @@ function Overlay({
       <VersionFooter />
       <svg width="0" height="0" aria-hidden="true">
         <defs>
-          <clipPath id="streamwall-grid-clip" clipPathUnits="userSpaceOnUse">
-            <path ref={gridClipRef} clipRule="evenodd" />
+          <clipPath id="streamwall-grid-clip" clipPathUnits="objectBoundingBox">
+            <path clipRule="evenodd" d="M0 0H1V1H0Z M.1 .1V.9H.9V.1Z" />
           </clipPath>
         </defs>
       </svg>
@@ -174,7 +142,7 @@ function Overlay({
         const hasTitle = data && (data.label || data.source)
         const position = data?.labelPosition ?? 'top-left'
         const isPreparing = expandedKey === (content.streamId ?? content.url) &&
-          spotlightPhase === 'preparing'
+          spotlightPhase === 'preparing' && !spotlightVisible
         // The spotlight video sits below this transparent overlay. Do not paint
         // the source tile's blur, label, or border over the enlarged video.
         // Its media view is blurred separately while spotlight is visible.
@@ -221,16 +189,31 @@ function Overlay({
         )
       })}
       </GridAnnotations>
-      {expandedContent && expandedPos && spotlightPhase !== 'preparing' && (
+      {expandedContent && expandedPos && spotlightVisible && (
         <SpotlightFrame
-          ref={spotlightFrameRef}
-          $pos={expandedPos}
-          $expanded={frameExpanded}
+          key={expandedKey}
+          $phase={spotlightPhase}
+          style={{
+            '--spotlight-x': `${expandedPos.x - width * 0.1}px`,
+            '--spotlight-y': `${expandedPos.y - height * 0.1}px`,
+            '--spotlight-scale-x': expandedPos.width / (width * 0.8),
+            '--spotlight-scale-y': expandedPos.height / (height * 0.8),
+          }}
           onClick={() => toggleSpotlight(
             expandedContent.streamId,
             expandedContent.url,
           )}
         >
+          {spotlightSnapshot && spotlightPhase !== 'open' && (
+            <SpotlightSnapshot
+              src={spotlightSnapshot}
+              alt=""
+              onLoad={() => {
+                if (spotlightPhase === 'closing') window.streamwallLayer.spotlightFrameReady()
+              }}
+            />
+          )}
+          {spotlightPhase === 'preparing' && <PreparingLabel>Starting live stream…</PreparingLabel>}
           {expandedData && (expandedData.label || expandedData.source) && (
             <StreamTitle
               position={expandedData.labelPosition ?? 'top-left'}
@@ -351,7 +334,7 @@ const SpaceBorder = styled.div.attrs(() => ({
 }))`
   display: flex;
   align-items: flex-start;
-  position: fixed;
+  position: absolute;
   left: ${({ pos }) => `${pos.x}px`};
   top: ${({ pos }) => `${pos.y}px`};
   width: ${({ pos }) => `${pos.width}px`};
@@ -375,22 +358,43 @@ const SpaceBorder = styled.div.attrs(() => ({
   user-select: none;
 `
 
-const SpotlightFrame = styled.div<{ $pos: { x: number; y: number; width: number; height: number }; $expanded: boolean }>`
+const spotlightGrow = keyframes`
+  from { transform: translate(var(--spotlight-x), var(--spotlight-y))
+    scale(var(--spotlight-scale-x), var(--spotlight-scale-y)); }
+  to { transform: translate(0, 0) scale(1, 1); }
+`
+
+const spotlightShrink = keyframes`
+  from { transform: translate(0, 0) scale(1, 1); }
+  to { transform: translate(var(--spotlight-x), var(--spotlight-y))
+    scale(var(--spotlight-scale-x), var(--spotlight-scale-y)); }
+`
+
+const SpotlightFrame = styled.div<{ $phase: 'preparing' | 'open' | 'closing' | null }>`
   position: fixed;
-  left: ${({ $pos, $expanded }) => $expanded ? '10vw' : `${$pos.x}px`};
-  top: ${({ $pos, $expanded }) => $expanded ? '10vh' : `${$pos.y}px`};
-  width: ${({ $pos, $expanded }) => $expanded ? '80vw' : `${$pos.width}px`};
-  height: ${({ $pos, $expanded }) => $expanded ? '80vh' : `${$pos.height}px`};
+  left: 10vw;
+  top: 10vh;
+  width: 80vw;
+  height: 80vh;
   z-index: 1000;
   box-sizing: border-box;
   border: 2px solid rgba(255, 255, 255, 0.6);
   box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
-  transition: left 300ms cubic-bezier(0.33, 1, 0.68, 1),
-    top 300ms cubic-bezier(0.33, 1, 0.68, 1),
-    width 300ms cubic-bezier(0.33, 1, 0.68, 1),
-    height 300ms cubic-bezier(0.33, 1, 0.68, 1);
+  transform-origin: top left;
+  animation: ${({ $phase }) => $phase === 'open' ? 'none' :
+    $phase === 'closing' ? spotlightShrink : spotlightGrow}
+    300ms cubic-bezier(0.33, 1, 0.68, 1) both;
   cursor: pointer;
   pointer-events: auto;
+`
+
+const SpotlightSnapshot = styled.img`
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  pointer-events: none;
 `
 
 const PreparingLabel = styled.div`

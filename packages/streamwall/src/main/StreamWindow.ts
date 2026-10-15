@@ -282,6 +282,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   private spotlightStartTimer?: NodeJS.Timeout
   private spotlightAnimation?: NodeJS.Timeout
   private spotlightAnimationGeneration = 0
+  private spotlightSnapshot?: string
+  private spotlightTransitionStartedAt = 0
   static ipcRegistered = false
   static senderToWindow = new Map<number, StreamWindow>()
   static nextHlsMediaSessionPool = 0
@@ -465,6 +467,17 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         inst.toggleSpotlight(url, streamId)
       },
     )
+
+    ipcMain.on('spotlight-frame-ready', (ev) => {
+      const inst = StreamWindow.senderToWindow.get(ev.sender.id)
+      if (!inst || ev.sender !== inst.overlayView.webContents ||
+          inst.spotlightPhase !== 'closing' || !inst.spotlightActor) return
+      const view = inst.spotlightActor.getSnapshot().context.view
+      if (!view.webContents.isDestroyed() && !inst.win.isDestroyed()) {
+        // The shrinking snapshot is painted; uncover the grid in one step.
+        inst.win.contentView.addChildView(view, 0)
+      }
+    })
 
     ipcMain.handle('view-init', async (ev) => {
       const inst = StreamWindow.senderToWindow.get(ev.sender.id)
@@ -1331,22 +1344,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   private setSpotlight(token: string | null) {
     if (token === this.spotlightToken && this.spotlightPhase !== 'closing') return
     if (token === null) {
-      if (this.spotlightPhase !== 'open' || !this.spotlightActor) {
+      if (!this.spotlightSnapshot || this.spotlightPhase === 'closing') {
         this.finishSpotlight()
         return
       }
-      const source = this.views.get(this.spotlightSourceId ?? -1)
-      const destination = source?.getSnapshot().context.pos
-      const view = this.spotlightActor.getSnapshot().context.view
-      if (!destination || view.webContents.isDestroyed()) {
-        this.finishSpotlight()
-        return
-      }
+      if (this.spotlightAnimation) clearTimeout(this.spotlightAnimation)
       this.spotlightPhase = 'closing'
       this.syncSpotlightOverlay()
-      this.animateSpotlight(view, view.getBounds(), destination, () =>
-        this.finishSpotlight(),
-      )
+      this.spotlightAnimation = setTimeout(() => this.finishSpotlight(), SPOTLIGHT_ANIMATION_MS + 50)
       return
     }
 
@@ -1360,6 +1365,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.spotlightToken = token
     this.spotlightSourceId = snapshot.context.id
     this.spotlightPhase = 'preparing'
+    this.spotlightTransitionStartedAt = Date.now()
     this.spotlightStartTimer = setTimeout(() => {
       if (this.spotlightToken !== token || this.spotlightPhase !== 'preparing') return
       console.warn('[spotlight] stream timed out while opening', token)
@@ -1379,6 +1385,18 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     const content = snapshot.context.content
     const token = this.spotlightToken
     if (!content || !token || !snapshot.matches({ displaying: 'running' })) return
+    const generation = this.spotlightAnimationGeneration
+    // One small tile capture gives immediate feedback without opening another
+    // decoder or resizing native video surfaces on every animation frame.
+    void snapshot.context.view.webContents.capturePage(undefined, { stayHidden: true }).then((image) => {
+      if (generation !== this.spotlightAnimationGeneration ||
+          this.spotlightToken !== token || this.spotlightPhase !== 'preparing') return
+      if (!image.isEmpty()) {
+        this.spotlightSnapshot = image.toDataURL()
+        this.spotlightTransitionStartedAt = Date.now()
+        this.syncSpotlightOverlay()
+      }
+    }).catch((error) => console.warn('[spotlight] tile capture failed', error))
     let actor: ViewActor
     try {
       actor = this.createView(content)
@@ -1399,14 +1417,20 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       }
     })
     actor.send({ type: 'OPTIONS', options: snapshot.context.options ?? {} })
+    const bounds = this.spotlightBounds()
     actor.send({
       type: 'DISPLAY',
       content,
-      pos: { x: -2, y: -2, width: 1, height: 1, spaces: [] },
+      pos: {
+        ...bounds,
+        x: -bounds.width - 2,
+        spaces: [],
+      },
     })
   }
 
   private openSpotlight() {
+    if (this.spotlightPhase !== 'preparing' || this.spotlightAnimation) return
     const actor = this.spotlightActor
     const source = this.views.get(this.spotlightSourceId ?? -1)
     const sourceSnapshot = source?.getSnapshot()
@@ -1422,6 +1446,14 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       this.finishSpotlight()
       return
     }
+    const waitForAnimation = SPOTLIGHT_ANIMATION_MS - (Date.now() - this.spotlightTransitionStartedAt)
+    if (waitForAnimation > 0) {
+      this.spotlightAnimation = setTimeout(() => {
+        this.spotlightAnimation = undefined
+        this.openSpotlight()
+      }, waitForAnimation)
+      return
+    }
     if (this.spotlightStartTimer) clearTimeout(this.spotlightStartTimer)
     this.spotlightStartTimer = undefined
     this.spotlightSourceWasBlurred = sourceSnapshot.matches(
@@ -1433,7 +1465,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         view,
         this.win.contentView.children.length - 2,
       )
-      view.setBounds(from)
+      view.setBounds(this.spotlightBounds())
       const sourceWebContents = sourceSnapshot.context.view.webContents
       this.spotlightBlurredSource = sourceWebContents
       this.spotlightBlurOnLoad = () => {
@@ -1445,9 +1477,6 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       this.spotlightBlurOnLoad()
       if (!this.spotlightSourceWasBlurred) source.send({ type: 'BLUR' })
       this.syncSpotlightOverlay()
-      this.animateSpotlight(view, from, this.spotlightBounds(), () =>
-        this.applySpotlight(),
-      )
     } catch (error) {
       console.warn('[spotlight] failed to open duplicate view', error)
       this.finishSpotlight()
@@ -1466,45 +1495,6 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     }
   }
 
-  private animateSpotlight(
-    view: WebContentsView,
-    from: Rectangle,
-    to: Rectangle,
-    onDone: () => void,
-  ) {
-    if (this.spotlightAnimation) clearTimeout(this.spotlightAnimation)
-    this.spotlightAnimation = undefined
-    const generation = ++this.spotlightAnimationGeneration
-    const started = Date.now()
-    const step = () => {
-      if (generation !== this.spotlightAnimationGeneration ||
-          view.webContents.isDestroyed() || this.win.isDestroyed()) return
-      const progress = Math.min(1, (Date.now() - started) / SPOTLIGHT_ANIMATION_MS)
-      const eased = 1 - Math.pow(1 - progress, 3)
-      const value = (start: number, end: number) =>
-        Math.round(start + (end - start) * eased)
-      try {
-        view.setBounds({
-          x: value(from.x, to.x),
-          y: value(from.y, to.y),
-          width: Math.max(1, value(from.width, to.width)),
-          height: Math.max(1, value(from.height, to.height)),
-        })
-      } catch (error) {
-        console.warn('[spotlight] failed to animate view', error)
-        onDone()
-        return
-      }
-      if (progress < 1) {
-        this.spotlightAnimation = setTimeout(step, 16)
-      } else {
-        this.spotlightAnimation = undefined
-        onDone()
-      }
-    }
-    step()
-  }
-
   private finishSpotlight() {
     const token = this.spotlightToken
     if (this.spotlightStartTimer) clearTimeout(this.spotlightStartTimer)
@@ -1513,6 +1503,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.spotlightStartTimer = this.spotlightAnimation = undefined
     this.spotlightSubscription?.unsubscribe()
     this.spotlightSubscription = undefined
+    const shouldUnblur = !!this.spotlightBlurredSource && !this.spotlightSourceWasBlurred
     if (this.spotlightBlurredSource) {
       if (this.spotlightBlurOnLoad) {
         this.spotlightBlurredSource.removeListener(
@@ -1527,12 +1518,12 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.spotlightBlurOnLoad = undefined
     const actor = this.spotlightActor
     const source = this.views.get(this.spotlightSourceId ?? -1)
-    const shouldUnblur = !this.spotlightSourceWasBlurred && this.spotlightPhase !== 'preparing'
     this.spotlightActor = null
     this.spotlightSourceId = null
     this.spotlightSourceWasBlurred = false
     this.spotlightToken = null
     this.spotlightPhase = null
+    this.spotlightSnapshot = undefined
     if (actor) {
       const view = actor.getSnapshot().context.view
       hlsStartupScheduler.cancel(view.webContents.id)
@@ -1559,6 +1550,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       url: selected?.url,
       streamId: selected?.streamId,
       phase: this.spotlightPhase,
+      snapshot: this.spotlightPhase === 'open' ? undefined : this.spotlightSnapshot,
     })
   }
 
@@ -1587,6 +1579,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     if (this.spotlightPhase !== 'open' || this.spotlightAnimation ||
         !this.spotlightActor || this.win.isDestroyed()) return
     const view = this.spotlightActor.getSnapshot().context.view
-    if (!view.webContents.isDestroyed()) view.setBounds(this.spotlightBounds())
+    if (!view.webContents.isDestroyed()) {
+      this.win.contentView.addChildView(view, this.win.contentView.children.length - 2)
+      view.setBounds(this.spotlightBounds())
+    }
   }
 }
