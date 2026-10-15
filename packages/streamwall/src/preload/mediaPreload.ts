@@ -18,10 +18,15 @@ const isLocalHlsPlayer =
 
 const SPOTLIGHT_BLUR_CLASS = 'streamwall-spotlight-blurred'
 let spotlightBlurred = false
-webFrame.insertCSS(
-  `html.${SPOTLIGHT_BLUR_CLASS} { filter: blur(8px) !important; }`,
-  { cssOrigin: 'user' },
-).catch((error) => console.warn('[spotlight] blur style failed', error))
+try {
+  webFrame.insertCSS(
+    `html.${SPOTLIGHT_BLUR_CLASS} { filter: blur(8px) !important; }`,
+    { cssOrigin: 'user' },
+  )
+} catch (error) {
+  // A cosmetic failure must not prevent the media preload from starting.
+  console.warn('[spotlight] blur style failed', error)
+}
 const applySpotlightBlur = () =>
   document.documentElement?.classList.toggle(SPOTLIGHT_BLUR_CLASS, spotlightBlurred)
 ipcRenderer.on('spotlight-blur', (_event, blurred: boolean) => {

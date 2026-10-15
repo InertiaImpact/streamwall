@@ -1,7 +1,7 @@
 {
   "name": "streamwall",
   "productName": "Streamwall",
-  "version": "2.7.2-bs",
+  "version": "2.7.3-bs",
   "description": "Watch streams in a grid layout",
   "main": ".vite/build/index.js",
   "repository": "github:streamwall/streamwall",
@@ -11,7 +11,8 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx .",
-    "test": "node --require esbuild-register src/test.ts"
+    "test": "node --require esbuild-register src/test.ts",
+    "test:preload": "node scripts/check-media-preload.cjs"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.6.0",
