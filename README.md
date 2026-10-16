@@ -117,6 +117,12 @@ without an overlay. Visibility is saved per grid cell on this installation;
 merged cells toggle together. Hidden graphics stay loaded for quick toggling,
 while the underlying video keeps playing.
 
+Enlarged video uses a separate transparent graphics surface above its native
+player. It starts loading alongside the enlarged player and retains the source
+cell's scale and visibility. Graphics are included in the grow/shrink previews;
+closing the enlarged view releases its graphics surface while the original tile's
+graphics page continues running.
+
 To define an overlay alongside a source in `streams.toml`:
 
 ```toml
@@ -136,7 +142,7 @@ the configuration to another installation.
 The page fills the tile and receives its current viewport size. Use responsive
 graphics with a transparent HTML/canvas background. Overlays are visual only:
 clicks continue to operate the tile and enlarged view. Embedding restrictions set
-by the graphics provider (or by a third-party web stream page) still apply.
+by the graphics provider still apply.
 
 ## Hotkeys
 

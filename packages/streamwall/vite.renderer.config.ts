@@ -10,6 +10,7 @@ export default defineConfig({
       input: {
         background: resolve(__dirname, 'src/renderer/background.html'),
         overlay: resolve(__dirname, 'src/renderer/overlay.html'),
+        spotlightOverlay: resolve(__dirname, 'src/renderer/spotlightOverlay.html'),
         playHLS: resolve(__dirname, 'src/renderer/playHLS.html'),
         control: resolve(__dirname, 'src/renderer/control.html'),
       },

@@ -42,6 +42,15 @@ function Overlay({
     'preparing' | 'open' | 'closing' | null
   >(null)
   const [spotlightSnapshot, setSpotlightSnapshot] = useState<string | undefined>()
+  const [spotlightOverlaySnapshot, setSpotlightOverlaySnapshot] = useState<string | undefined>()
+  const [loadedVideoSnapshot, setLoadedVideoSnapshot] = useState<string | undefined>()
+  const [loadedOverlaySnapshot, setLoadedOverlaySnapshot] = useState<string | undefined>()
+  useEffect(() => {
+    if (spotlightPhase === 'closing' && spotlightSnapshot && loadedVideoSnapshot === spotlightSnapshot &&
+        (!spotlightOverlaySnapshot || loadedOverlaySnapshot === spotlightOverlaySnapshot)) {
+      window.streamwallLayer.spotlightFrameReady()
+    }
+  }, [spotlightPhase, spotlightSnapshot, spotlightOverlaySnapshot, loadedVideoSnapshot, loadedOverlaySnapshot])
 
   const toggleSpotlight = useCallback((streamId?: string, url?: string) => {
     window.streamwallLayer.spotlight(url, streamId)
@@ -56,12 +65,14 @@ function Overlay({
         streamId?: string,
         phase?: 'preparing' | 'open' | 'closing' | null,
         snapshot?: string,
+        overlaySnapshot?: string,
       ) => {
         console.debug('Received spotlight message for URL:', url, streamId)
         setExpandedUrl(url)
         setExpandedStreamId(streamId)
         setSpotlightPhase(phase ?? null)
         setSpotlightSnapshot(snapshot)
+        setSpotlightOverlaySnapshot(overlaySnapshot)
       },
     )
     return unsubscribe
@@ -220,13 +231,15 @@ function Overlay({
             <SpotlightSnapshot
               src={spotlightSnapshot}
               alt=""
-              onLoad={() => {
-                if (spotlightPhase === 'closing') window.streamwallLayer.spotlightFrameReady()
-              }}
+              onLoad={() => setLoadedVideoSnapshot(spotlightSnapshot)}
             />
           )}
+          {spotlightOverlaySnapshot && (
+            <SpotlightSnapshot src={spotlightOverlaySnapshot} alt=""
+              onLoad={() => setLoadedOverlaySnapshot(spotlightOverlaySnapshot)} />
+          )}
           {spotlightPhase === 'preparing' && <PreparingLabel>Starting live stream…</PreparingLabel>}
-          {expandedData && (expandedData.label || expandedData.source) && (
+          {!spotlightOverlaySnapshot && expandedData && (expandedData.label || expandedData.source) && (
             <StreamTitle
               position={expandedData.labelPosition ?? 'top-left'}
               activeColor={activeColor}

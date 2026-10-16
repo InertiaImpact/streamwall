@@ -6,6 +6,7 @@ type SpotlightPayload = {
   streamId?: string
   phase?: 'preparing' | 'open' | 'closing' | null
   snapshot?: string
+  overlaySnapshot?: string
 }
 let latestSpotlight: SpotlightPayload | undefined
 // State can arrive before the overlay component mounts its listener.
@@ -30,15 +31,16 @@ const api = {
     streamId?: string,
     phase?: 'preparing' | 'open' | 'closing' | null,
     snapshot?: string,
+    overlaySnapshot?: string,
   ) => void) => {
     const internalHandler = (
       _ev: IpcRendererEvent,
       payload: SpotlightPayload,
-    ) => handleSpotlight(payload?.url, payload?.streamId, payload?.phase, payload?.snapshot)
+    ) => handleSpotlight(payload?.url, payload?.streamId, payload?.phase, payload?.snapshot, payload?.overlaySnapshot)
     ipcRenderer.on('spotlight', internalHandler)
     if (latestSpotlight) {
       handleSpotlight(latestSpotlight.url, latestSpotlight.streamId,
-        latestSpotlight.phase, latestSpotlight.snapshot)
+        latestSpotlight.phase, latestSpotlight.snapshot, latestSpotlight.overlaySnapshot)
     }
     return () => {
       ipcRenderer.off('spotlight', internalHandler)

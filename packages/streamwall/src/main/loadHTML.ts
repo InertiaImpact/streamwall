@@ -4,7 +4,7 @@ import querystring from 'querystring'
 
 export function loadHTML(
   webContents: WebContents,
-  name: 'background' | 'overlay' | 'playHLS' | 'control',
+  name: 'background' | 'overlay' | 'spotlightOverlay' | 'playHLS' | 'control',
   options?: { query?: Record<string, string> },
 ) {
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {

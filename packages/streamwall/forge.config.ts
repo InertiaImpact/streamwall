@@ -84,6 +84,11 @@ const config: ForgeConfig = {
           target: 'preload',
         },
         {
+          entry: 'src/preload/spotlightOverlayPreload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
+        {
           entry: 'src/preload/controlPreload.ts',
           config: 'vite.preload.config.ts',
           target: 'preload',

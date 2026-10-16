@@ -23,6 +23,7 @@ import {
   ViewPos,
   ViewState,
   isTileOverlayVisible,
+  normalizeOverlayUrl,
 } from 'streamwall-shared'
 import { createActor, EventFrom, SnapshotFrom } from 'xstate'
 import {
@@ -274,6 +275,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   mediaHealth = new Map<number, MediaHealthSample>()
   private spotlightToken: string | null = null
   private spotlightActor: ViewActor | null = null
+  private spotlightGraphicsView: WebContentsView | null = null
   private spotlightSourceId: number | null = null
   private spotlightSourceWasBlurred = false
   private spotlightBlurredSource?: WebContents
@@ -284,6 +286,8 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
   private spotlightAnimation?: NodeJS.Timeout
   private spotlightAnimationGeneration = 0
   private spotlightSnapshot?: string
+  private spotlightOverlaySnapshot?: string
+  private spotlightClosingCapture = false
   private spotlightTransitionStartedAt = 0
   private latestState?: StreamwallState
   static ipcRegistered = false
@@ -479,13 +483,18 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         // The shrinking snapshot is painted; uncover the grid in one step.
         inst.win.contentView.removeChildView(view)
         inst.win.contentView.addChildView(view, 0)
+        if (inst.spotlightGraphicsView) {
+          inst.win.contentView.removeChildView(inst.spotlightGraphicsView)
+          inst.win.contentView.addChildView(inst.spotlightGraphicsView, 0)
+        }
       }
     })
 
     ipcMain.on('spotlight-close', (ev) => {
       const inst = StreamWindow.senderToWindow.get(ev.sender.id)
       if (inst?.spotlightPhase === 'open' &&
-          ev.sender === inst.spotlightActor?.getSnapshot().context.view.webContents) {
+          (ev.sender === inst.spotlightActor?.getSnapshot().context.view.webContents ||
+            ev.sender === inst.spotlightGraphicsView?.webContents)) {
         inst.setSpotlight(null)
       }
     })
@@ -1364,8 +1373,30 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       }
       if (this.spotlightAnimation) clearTimeout(this.spotlightAnimation)
       this.spotlightPhase = 'closing'
-      this.syncSpotlightOverlay()
-      this.spotlightAnimation = setTimeout(() => this.finishSpotlight(), SPOTLIGHT_ANIMATION_MS + 50)
+      const generation = this.spotlightAnimationGeneration
+      const startClosing = () => {
+        if (generation !== this.spotlightAnimationGeneration || this.spotlightPhase !== 'closing') return
+        this.spotlightClosingCapture = false
+        this.syncSpotlightOverlay()
+        this.spotlightAnimation = setTimeout(() => this.finishSpotlight(), SPOTLIGHT_ANIMATION_MS + 50)
+      }
+      const graphics = this.spotlightGraphicsView
+      if (graphics && !graphics.webContents.isDestroyed()) {
+        this.spotlightClosingCapture = true
+        let timeout: NodeJS.Timeout | undefined
+        // Capture graphics once for the shrink animation; never wait on a hung page.
+        void Promise.race([
+          graphics.webContents.capturePage(undefined, { stayHidden: true }).catch(() => undefined),
+          new Promise<undefined>((resolve) => { timeout = setTimeout(() => resolve(undefined), 200) }),
+        ]).then((image) => {
+          if (generation !== this.spotlightAnimationGeneration) return
+          this.spotlightOverlaySnapshot = image && !image.isEmpty() ? image.toDataURL() : undefined
+          startClosing()
+        }).finally(() => { if (timeout) clearTimeout(timeout) })
+      } else {
+        this.spotlightOverlaySnapshot = undefined
+        startClosing()
+      }
       return
     }
 
@@ -1402,11 +1433,23 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     const generation = this.spotlightAnimationGeneration
     // One small tile capture gives immediate feedback without opening another
     // decoder or resizing native video surfaces on every animation frame.
-    void snapshot.context.view.webContents.capturePage(undefined, { stayHidden: true }).then((image) => {
+    const state = this.latestState
+    const metadata = state?.streams.find((stream) => content.streamId
+      ? stream._id === content.streamId : stream.link === content.url)
+    const captureGraphics = !!normalizeOverlayUrl(metadata?.overlayUrl) &&
+      isTileOverlayVisible(state?.uiState?.overlayHiddenCells, state?.gridId, snapshot.context.pos!.spaces)
+    const { x, y, width, height } = snapshot.context.pos!
+    void Promise.all([
+      snapshot.context.view.webContents.capturePage(undefined, { stayHidden: true }),
+      captureGraphics
+        ? this.overlayView.webContents.capturePage({ x, y, width, height }, { stayHidden: true }).catch(() => undefined)
+        : Promise.resolve(undefined),
+    ]).then(([image, graphics]) => {
       if (generation !== this.spotlightAnimationGeneration ||
           this.spotlightToken !== token || this.spotlightPhase !== 'preparing') return
       if (!image.isEmpty()) {
         this.spotlightSnapshot = image.toDataURL()
+        this.spotlightOverlaySnapshot = graphics && !graphics.isEmpty() ? graphics.toDataURL() : undefined
         this.spotlightTransitionStartedAt = Date.now()
         this.syncSpotlightOverlay()
       }
@@ -1441,6 +1484,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         spaces: [],
       },
     })
+    this.syncSpotlightControls()
   }
 
   private openSpotlight() {
@@ -1538,6 +1582,9 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.spotlightToken = null
     this.spotlightPhase = null
     this.spotlightSnapshot = undefined
+    this.spotlightOverlaySnapshot = undefined
+    this.spotlightClosingCapture = false
+    this.disposeSpotlightGraphics()
     if (actor) {
       const view = actor.getSnapshot().context.view
       hlsStartupScheduler.cancel(view.webContents.id)
@@ -1563,19 +1610,20 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     this.overlayView.webContents.send('spotlight', {
       url: selected?.url,
       streamId: selected?.streamId,
-      phase: this.spotlightPhase,
+      phase: this.spotlightClosingCapture ? 'open' : this.spotlightPhase,
       snapshot: this.spotlightPhase === 'open' ? undefined : this.spotlightSnapshot,
+      overlaySnapshot: this.spotlightPhase === 'open' ? undefined : this.spotlightOverlaySnapshot,
     })
   }
 
   private syncSpotlightControls() {
-    if (this.spotlightPhase !== 'open' || !this.spotlightActor) return
+    if ((this.spotlightPhase !== 'open' && this.spotlightPhase !== 'preparing') || !this.spotlightActor) return
     const { view, content, info } = this.spotlightActor.getSnapshot().context
     if (!content || view.webContents.isDestroyed()) return
     const state = this.latestState
     const stream = state?.streams.find((item) => content.streamId
       ? item._id === content.streamId : item.link === content.url)
-    view.webContents.send('spotlight-controls', {
+    const payload = {
       label: stream?.label || stream?.source || info?.title || '',
       labelPosition: stream?.labelPosition ?? 'top-left',
       fontSize: state?.overlayLabelFontSize ?? 16,
@@ -1586,7 +1634,66 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
         state?.gridId,
         this.findSpotlightView()?.getSnapshot().context.pos?.spaces ?? [],
       ),
+    }
+    // Stream pages may forbid frames or impose their own stacking styles.
+    // Render graphics in an app-owned transparent surface above the player.
+    view.webContents.send('spotlight-controls', {
+      ...payload, label: normalizeOverlayUrl(payload.overlayUrl) ? '' : payload.label, overlayUrl: undefined,
     })
+    if (!normalizeOverlayUrl(payload.overlayUrl)) {
+      this.disposeSpotlightGraphics()
+      return
+    }
+    if (this.spotlightGraphicsView?.webContents.isDestroyed()) this.disposeSpotlightGraphics()
+    if (!this.spotlightGraphicsView) {
+      const graphics = new WebContentsView({
+        webPreferences: {
+          preload: path.join(__dirname, 'spotlightOverlayPreload.js'),
+          nodeIntegration: false,
+          contextIsolation: true,
+          backgroundThrottling: false,
+        },
+      })
+      this.spotlightGraphicsView = graphics
+      graphics.setBackgroundColor('#00000000')
+      const bounds = this.spotlightBounds()
+      graphics.setBounds({ ...bounds, x: -bounds.width - 2 })
+      this.win.contentView.addChildView(graphics, 0)
+      StreamWindow.registerSender(graphics.webContents.id, this)
+      const senderId = graphics.webContents.id
+      graphics.webContents.once('destroyed', () => {
+        StreamWindow.senderToWindow.delete(senderId)
+        if (this.spotlightGraphicsView === graphics) this.spotlightGraphicsView = null
+      })
+      graphics.webContents.on('dom-ready', () => {
+        if (this.spotlightGraphicsView === graphics) this.syncSpotlightControls()
+      })
+      graphics.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+      loadHTML(graphics.webContents, 'spotlightOverlay')
+    }
+    this.spotlightGraphicsView.webContents.send('spotlight-controls', payload)
+    this.positionSpotlightGraphics()
+  }
+
+  private positionSpotlightGraphics() {
+    const graphics = this.spotlightGraphicsView
+    if (this.spotlightPhase !== 'open' || !graphics ||
+        graphics.webContents.isDestroyed() || this.win.isDestroyed()) return
+    const children = this.win.contentView.children
+    if (children[children.length - 1] !== graphics) this.win.contentView.addChildView(graphics)
+    const bounds = this.spotlightBounds()
+    if (!isEqual(graphics.getBounds(), bounds)) graphics.setBounds(bounds)
+  }
+
+  private disposeSpotlightGraphics() {
+    const graphics = this.spotlightGraphicsView
+    this.spotlightGraphicsView = null
+    if (!graphics) return
+    if (!graphics.webContents.isDestroyed()) StreamWindow.senderToWindow.delete(graphics.webContents.id)
+    if (!this.win.isDestroyed()) {
+      try { this.win.contentView.removeChildView(graphics) } catch { /* detached */ }
+    }
+    if (!graphics.webContents.isDestroyed()) graphics.webContents.close()
   }
 
   private findSpotlightView(token = this.spotlightToken) {
@@ -1617,6 +1724,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
     if (!view.webContents.isDestroyed()) {
       this.win.contentView.addChildView(view)
       view.setBounds(this.spotlightBounds())
+      this.positionSpotlightGraphics()
     }
   }
 }
