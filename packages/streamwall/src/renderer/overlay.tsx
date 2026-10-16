@@ -11,7 +11,7 @@ import {
   FaYoutube,
 } from 'react-icons/fa'
 import { RiKickFill, RiTwitterXFill } from 'react-icons/ri'
-import { StreamwallState, normalizeOverlayUrl, normalizeOverlayScale } from 'streamwall-shared'
+import { StreamwallState, normalizeOverlayUrl, normalizeOverlayScale, isTileOverlayVisible } from 'streamwall-shared'
 import { keyframes, styled } from 'styled-components'
 import { TailSpin } from 'svg-loaders-react'
 import { matchesState } from 'xstate'
@@ -32,7 +32,9 @@ function Overlay({
   views,
   streams,
   overlayLabelFontSize,
-}: Pick<StreamwallState, 'config' | 'views' | 'streams' | 'overlayLabelFontSize'>) {
+  gridId,
+  uiState,
+}: Pick<StreamwallState, 'config' | 'views' | 'streams' | 'overlayLabelFontSize' | 'gridId' | 'uiState'>) {
   const { width, height, activeColor } = config
   const [expandedUrl, setExpandedUrl] = useState<string | undefined>()
   const [expandedStreamId, setExpandedStreamId] = useState<string | undefined>()
@@ -153,7 +155,9 @@ function Overlay({
               style={{ cursor: 'pointer' }}
             >
               {normalizeOverlayUrl(data?.overlayUrl) && (
-                <TileOverlayClip>
+                <TileOverlayClip style={{ visibility: isTileOverlayVisible(
+                  uiState?.overlayHiddenCells, gridId, pos.spaces,
+                ) ? 'visible' : 'hidden' }}>
                 <TileOverlay
                   src={normalizeOverlayUrl(data?.overlayUrl)}
                   title="Tile HTML overlay"
@@ -265,13 +269,15 @@ function App() {
     return
   }
 
-  const { config, views, streams, overlayLabelFontSize } = state
+  const { config, views, streams, overlayLabelFontSize, gridId, uiState } = state
   return (
     <Overlay
       config={config}
       views={views}
       streams={streams}
       overlayLabelFontSize={overlayLabelFontSize}
+      gridId={gridId}
+      uiState={uiState}
     />
   )
 }

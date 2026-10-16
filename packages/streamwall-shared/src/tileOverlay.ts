@@ -5,6 +5,14 @@ export function normalizeOverlayScale(value: unknown): number {
     ? Math.min(300, Math.max(10, Math.round(value))) : 100
 }
 
+export function isTileOverlayVisible(
+  hiddenCells: Record<string, boolean> | undefined,
+  gridId: string | undefined,
+  spaces: number[],
+): boolean {
+  return !spaces.some((space) => hiddenCells?.[`${gridId ?? 'grid-1'}:${space}`] === true)
+}
+
 /** Reject executable/local URLs before they reach an embedded graphics page. */
 export function normalizeOverlayUrl(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined

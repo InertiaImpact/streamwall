@@ -16,6 +16,7 @@ import { useHotkeys } from 'react-hotkeys-hook'
 import {
   FaExchangeAlt,
   FaFolder,
+  FaLayerGroup,
   FaCog,
   FaRedoAlt,
   FaRegLifeRing,
@@ -46,6 +47,7 @@ import {
   ViewState,
   normalizeOverlayUrl,
   normalizeOverlayScale,
+  isTileOverlayVisible,
 } from 'streamwall-shared'
 import { createGlobalStyle, styled } from 'styled-components'
 import { matchesState } from 'xstate'
@@ -208,6 +210,7 @@ export interface CollabData {
   uiState?: {
     loopRefreshErrored?: boolean
     loopRefreshErroredByGrid?: Record<string, boolean>
+    overlayHiddenCells?: Record<string, boolean>
     spotlightAssignments?: Record<string, string | null>
     spotlightedByGrid?: Record<string, string | null>
   }
@@ -992,6 +995,24 @@ export function ControlUI({
     (localIdx: number) => cellOffset + localIdx,
     [cellOffset],
   )
+
+  const handleSetOverlayVisible = useCallback((spaces: number[], visible: boolean) => {
+    const gridId = activeGridId ?? defaultGridId ?? grids?.[0]?.id
+    if (!gridId) return
+    stateDoc.transact(() => {
+      const uiStateMap = stateDoc.getMap<any>('uiState')
+      let hiddenCells = uiStateMap.get('overlayHiddenCells') as Y.Map<boolean> | undefined
+      if (!hiddenCells) {
+        hiddenCells = new Y.Map<boolean>()
+        uiStateMap.set('overlayHiddenCells', hiddenCells)
+      }
+      for (const space of spaces) {
+        const key = `${gridId}:${space}`
+        if (visible) hiddenCells.delete(key)
+        else hiddenCells.set(key, true)
+      }
+    })
+  }, [stateDoc, activeGridId, defaultGridId, grids])
 
   const getViewsMap = useCallback(
     () => stateDoc.getMap<Y.Map<string | undefined>>('views'),
@@ -2038,6 +2059,14 @@ export function ControlUI({
                             isListening={isListening}
                             isBackgroundListening={isBackgroundListening}
                             isBlurred={isBlurred}
+                            hasOverlay={!!normalizeOverlayUrl(streams.find((item) =>
+                              item._id === (state.context.content?.streamId ?? streamId))?.overlayUrl)}
+                            overlayVisible={isTileOverlayVisible(
+                              sharedState?.uiState?.overlayHiddenCells,
+                              activeGridId ?? defaultGridId ?? grids?.[0]?.id,
+                              pos.spaces,
+                            )}
+                            onSetOverlayVisible={handleSetOverlayVisible}
                             isSwapping={
                               swapStartIdx != null &&
                               pos.spaces.includes(swapStartIdx)
@@ -2927,6 +2956,9 @@ function GridControls({
   isListening,
   isBackgroundListening,
   isBlurred,
+  hasOverlay,
+  overlayVisible,
+  onSetOverlayVisible,
   isSwapping,
   showDebug,
   role,
@@ -2956,6 +2988,9 @@ function GridControls({
   isListening: boolean
   isBackgroundListening: boolean
   isBlurred: boolean
+  hasOverlay: boolean
+  overlayVisible: boolean
+  onSetOverlayVisible: (spaces: number[], visible: boolean) => void
   isSwapping: boolean
   showDebug: boolean
   role: StreamwallRole | null
@@ -3079,6 +3114,22 @@ function GridControls({
         </StyledGridButtons>
       )}
       <StyledGridButtons side="right">
+        {hasOverlay && roleCan(role, 'mutate-state-doc') && roleCan(role, 'set-stream-overlay') && (
+          <StyledButton
+            type="button"
+            title={overlayVisible ? 'Hide HTML overlay' : 'Show HTML overlay'}
+            aria-label={overlayVisible ? 'Hide HTML overlay' : 'Show HTML overlay'}
+            aria-pressed={overlayVisible}
+            isActive={overlayVisible}
+            activeColor="#2196f3"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={() => onSetOverlayVisible(spaces, !overlayVisible)}
+            tabIndex={1}
+            $scale={controlScale}
+          >
+            <FaLayerGroup />
+          </StyledButton>
+        )}
         {onSpotlight && roleCan(role, 'set-listening-view') && (
           <StyledButton
             onClick={() => onSpotlight(playbackStreamId)}

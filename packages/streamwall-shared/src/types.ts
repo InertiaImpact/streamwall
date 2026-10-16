@@ -124,6 +124,8 @@ export interface AuthTokenInfo {
 }
 
 export interface StreamwallState {
+  /** Set on state scoped to an individual grid renderer. */
+  gridId?: string
   identity: {
     role: StreamwallRole
   }
@@ -144,6 +146,7 @@ export interface StreamwallState {
   uiState?: {
     loopRefreshErrored?: boolean
     loopRefreshErroredByGrid?: Record<string, boolean>
+    overlayHiddenCells?: Record<string, boolean>
     spotlightAssignments?: Record<string, string | null>
     spotlightedByGrid?: Record<string, string | null>
   }

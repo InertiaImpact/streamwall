@@ -1820,6 +1820,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     for (const grid of gridRuntimes) {
       const scopedState = {
         ...clientState,
+        gridId: grid.id,
         config: grid.config,
         views: gridViewState.get(grid.id) ?? [],
       }
@@ -1850,6 +1851,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
     grid.window.on('load', () => {
       const scopedState = {
         ...clientState,
+        gridId: grid.id,
         config: grid.config,
         views: gridViewState.get(grid.id) ?? [],
       }

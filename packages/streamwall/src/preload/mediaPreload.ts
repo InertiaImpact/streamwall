@@ -42,7 +42,7 @@ document.addEventListener('DOMContentLoaded', applySpotlightBlur, { once: true }
 let spotlightControls: HTMLDivElement | undefined
 let spotlightOverlay: HTMLIFrameElement | undefined
 ipcRenderer.on('spotlight-controls', (_event, payload: {
-  label?: string; labelPosition?: string; fontSize?: number; overlayUrl?: string; overlayScale?: number
+  label?: string; labelPosition?: string; fontSize?: number; overlayUrl?: string; overlayScale?: number; overlayVisible?: boolean
 }) => {
   if (!document.documentElement) return
   if (!spotlightControls) {
@@ -55,6 +55,7 @@ ipcRenderer.on('spotlight-controls', (_event, payload: {
           z-index: 2147483646 !important; pointer-events: none !important;
           transform: scale(var(--sw-overlay-scale, 1)) !important;
           transform-origin: center center !important;
+          visibility: var(--sw-overlay-visibility, visible) !important;
         }
         #streamwall-spotlight-controls {
           display: block !important; position: fixed !important;
@@ -118,6 +119,7 @@ ipcRenderer.on('spotlight-controls', (_event, payload: {
     // State broadcasts must not reload graphics or restart their animations.
     if (spotlightOverlay.src !== overlayUrl) spotlightOverlay.src = overlayUrl
     spotlightOverlay.style.setProperty('--sw-overlay-scale', String(normalizeOverlayScale(payload.overlayScale) / 100))
+    spotlightOverlay.style.setProperty('--sw-overlay-visibility', payload.overlayVisible === false ? 'hidden' : 'visible')
   }
 })
 

@@ -110,6 +110,13 @@ across grid positions and enlarged views. Streams with the same URL and crop sha
 the setting. Only displayed streams load graphics; ordinary state updates do not
 reload them. Existing full-window `kind = "overlay"` sources remain supported.
 
+Cells with a configured overlay show a **layers** button in the control grid.
+Click it to show or hide that cell's graphics, including in its enlarged view.
+The button is highlighted while graphics are visible and is absent on cells
+without an overlay. Visibility is saved per grid cell on this installation;
+merged cells toggle together. Hidden graphics stay loaded for quick toggling,
+while the underlying video keeps playing.
+
 To define an overlay alongside a source in `streams.toml`:
 
 ```toml

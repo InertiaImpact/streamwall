@@ -22,6 +22,7 @@ import {
   ViewContentMap,
   ViewPos,
   ViewState,
+  isTileOverlayVisible,
 } from 'streamwall-shared'
 import { createActor, EventFrom, SnapshotFrom } from 'xstate'
 import {
@@ -1580,6 +1581,11 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       fontSize: state?.overlayLabelFontSize ?? 16,
       overlayUrl: stream?.overlayUrl,
       overlayScale: stream?.overlayScale,
+      overlayVisible: isTileOverlayVisible(
+        state?.uiState?.overlayHiddenCells,
+        state?.gridId,
+        this.findSpotlightView()?.getSnapshot().context.pos?.spaces ?? [],
+      ),
     })
   }
 
