@@ -3633,18 +3633,10 @@ function TileOverlaySettings({ streams, onSave }: {
         disabled={!selected} placeholder="https://… (blank to remove)"
         onInput={(event) => setDraft(event.currentTarget.value)}
         style={{ minWidth: 280, flex: 1 }} />
-      <div role="group" aria-label="Overlay scale" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-        <button type="button" disabled={!selected || scale <= 10}
-          aria-label="Shrink overlay by 5 percent" onClick={() => setScale(normalizeOverlayScale(scale - 5))}>−5%</button>
-        <label>Scale <input type="number" min={10} max={300} step={1}
-          aria-label="Overlay scale percent" value={scale} disabled={!selected}
-          onChange={(event) => setScale(normalizeOverlayScale(event.currentTarget.valueAsNumber))}
-          style={{ width: 65 }} />%</label>
-        <button type="button" disabled={!selected || scale >= 300}
-          aria-label="Enlarge overlay by 5 percent" onClick={() => setScale(normalizeOverlayScale(scale + 5))}>+5%</button>
-        <button type="button" disabled={!selected || scale === 100}
-          onClick={() => setScale(100)}>Reset 100%</button>
-      </div>
+      <label>Scale <input type="number" min={10} max={300} step={1}
+        aria-label="Overlay scale percent" value={scale} disabled={!selected}
+        onChange={(event) => setScale(normalizeOverlayScale(event.currentTarget.valueAsNumber))}
+        style={{ width: 65 }} />%</label>
       <button type="submit" disabled={!selected}>Save overlay</button>
       <button type="button" disabled={!selected || !selected.overlayUrl}
         onClick={() => { setDraft(''); onSave(streamId, '', scale) }}>Remove overlay</button>

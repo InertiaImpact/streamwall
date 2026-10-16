@@ -101,8 +101,8 @@ FFmpeg, so no separate command or service is needed.
 
 Use **Tile HTML overlay** in the control window or web interface. Choose a stream,
 paste the graphics page's HTTP(S) URL, and select **Save overlay**.
-Search the picker by ID, label, source, location, or URL. Use **−5%** /
-**+5%**, enter a percentage (10–300%), or **Reset 100%**, then **Save overlay** to
+Search the picker by ID, label, source, location, or URL.
+Enter a scale percentage (10–300%), then **Save overlay** to
 apply it. Scaling is centered and clipped to the tile without reloading the page.
 **Remove overlay**
 disables it. The setting is saved on this installation and follows the stream
