@@ -39,6 +39,8 @@ export interface StreamDataContent extends ContentDisplayOptions {
   label?: string
   /** Transparent HTML graphics composited over this stream. HTTP(S) only. */
   overlayUrl?: string
+  /** Centered graphics scale in percent; defaults to 100. */
+  overlayScale?: number
   labelPosition?: 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left'
   source?: string
   notes?: string
@@ -172,7 +174,7 @@ export type ControlCommand =
     }
   | { type: 'set-view-blurred'; viewIdx: number; blurred: boolean; gridId?: string }
   | { type: 'rotate-stream'; url: string; rotation: number }
-  | { type: 'set-stream-overlay'; streamId: string; overlayUrl: string }
+  | { type: 'set-stream-overlay'; streamId: string; overlayUrl: string; overlayScale?: number }
   | { type: 'update-custom-stream'; url: string; data: LocalStreamData }
   | { type: 'delete-custom-stream'; url: string }
   | { type: 'reload-view'; viewIdx: number; gridId?: string }

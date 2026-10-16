@@ -11,7 +11,7 @@ import {
   FaYoutube,
 } from 'react-icons/fa'
 import { RiKickFill, RiTwitterXFill } from 'react-icons/ri'
-import { StreamwallState, normalizeOverlayUrl } from 'streamwall-shared'
+import { StreamwallState, normalizeOverlayUrl, normalizeOverlayScale } from 'streamwall-shared'
 import { keyframes, styled } from 'styled-components'
 import { TailSpin } from 'svg-loaders-react'
 import { matchesState } from 'xstate'
@@ -153,6 +153,7 @@ function Overlay({
               style={{ cursor: 'pointer' }}
             >
               {normalizeOverlayUrl(data?.overlayUrl) && (
+                <TileOverlayClip>
                 <TileOverlay
                   src={normalizeOverlayUrl(data?.overlayUrl)}
                   title="Tile HTML overlay"
@@ -160,8 +161,12 @@ function Overlay({
                   allow="autoplay"
                   referrerPolicy="no-referrer"
                   tabIndex={-1}
-                  style={{ filter: isObscured || isBlurred ? 'blur(15px)' : undefined }}
+                  style={{
+                    filter: isObscured || isBlurred ? 'blur(15px)' : undefined,
+                    transform: `scale(${normalizeOverlayScale(data?.overlayScale) / 100})`,
+                  }}
                 />
+                </TileOverlayClip>
               )}
               {!isObscured && isBlurred && <BlurCover />}
               {!isObscured && hasTitle && (
@@ -528,6 +533,14 @@ const OverlayIFrame = styled.iframe`
   pointer-events: none;
 `
 
+const TileOverlayClip = styled.div`
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: -1;
+`
+
 const TileOverlay = styled.iframe`
   position: absolute;
   inset: 0;
@@ -536,7 +549,7 @@ const TileOverlay = styled.iframe`
   border: none;
   background: transparent;
   pointer-events: none;
-  z-index: -1;
+  transform-origin: center center;
 `
 
 render(<App />, document.body)

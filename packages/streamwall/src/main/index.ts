@@ -15,6 +15,7 @@ import {
   StreamwallState,
   ViewState,
   normalizeOverlayUrl,
+  normalizeOverlayScale,
   streamOverlayKey,
 } from 'streamwall-shared'
 import { updateElectronApp } from 'update-electron-app'
@@ -1380,13 +1381,16 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           throw new Error('Overlay URL must start with http:// or https://')
         }
         const key = streamOverlayKey(target)
+        const overlayScale = normalizeOverlayScale(msg.overlayScale ?? target.overlayScale)
         await db.update((data) => {
           data.streamOverlayUrls ??= {}
           data.streamOverlayUrls[key] = overlayUrl ?? ''
+          data.streamOverlayScales ??= {}
+          data.streamOverlayScales[key] = overlayScale
         })
         // Update every matching assignment without navigating its media player.
         const streams = clientState.streams.map((stream) => streamOverlayKey(stream) === key
-          ? { ...stream, overlayUrl: overlayUrl ?? '' } : stream)
+          ? { ...stream, overlayUrl: overlayUrl ?? '', overlayScale } : stream)
         Object.assign(streams, {
           byId: new Map(streams.map((stream) => [stream._id, stream])),
         })
@@ -2051,6 +2055,7 @@ async function main(argv: ReturnType<typeof parseArgs>) {
   for await (const streams of combineDataSources(dataSources, idGen)) {
     for (const stream of streams) {
       stream.overlayUrl = db.data.streamOverlayUrls?.[streamOverlayKey(stream)] ?? stream.overlayUrl
+      stream.overlayScale = db.data.streamOverlayScales?.[streamOverlayKey(stream)] ?? stream.overlayScale
     }
     updateState({ streams })
     for (const grid of gridRuntimes) {

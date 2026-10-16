@@ -1,5 +1,10 @@
 import type { StreamDataContent } from './types.ts'
 
+export function normalizeOverlayScale(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.min(300, Math.max(10, Math.round(value))) : 100
+}
+
 /** Reject executable/local URLs before they reach an embedded graphics page. */
 export function normalizeOverlayUrl(value: unknown): string | undefined {
   if (typeof value !== 'string' || !value.trim()) return undefined

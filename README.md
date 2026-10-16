@@ -100,7 +100,11 @@ FFmpeg, so no separate command or service is needed.
 ### Transparent tile HTML overlays
 
 Use **Tile HTML overlay** in the control window or web interface. Choose a stream,
-paste the graphics page's HTTP(S) URL, and select **Save overlay**. **Remove overlay**
+paste the graphics page's HTTP(S) URL, and select **Save overlay**.
+Search the picker by ID, label, source, location, or URL. Use **−5%** /
+**+5%**, enter a percentage (10–300%), or **Reset 100%**, then **Save overlay** to
+apply it. Scaling is centered and clipped to the tile without reloading the page.
+**Remove overlay**
 disables it. The setting is saved on this installation and follows the stream
 across grid positions and enlarged views. Streams with the same URL and crop share
 the setting. Only displayed streams load graphics; ordinary state updates do not
@@ -114,11 +118,12 @@ kind = "video"
 label = "Camera with graphics"
 link = "https://example.com/live.m3u8"
 overlayUrl = "https://example.com/graphics/live"
+overlayScale = 100 # percent; optional
 ```
 
 Control interface settings override the TOML value for that URL and crop, including
 an explicit removal. These settings live in the application's saved data; exporting
-`streams.toml` exports the source file, so copy `overlayUrl` there when transferring
+`streams.toml` exports the source file, so copy `overlayUrl` and `overlayScale` there when transferring
 the configuration to another installation.
 
 The page fills the tile and receives its current viewport size. Use responsive

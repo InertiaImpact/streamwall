@@ -7,6 +7,7 @@ import {
   HlsRequestAcquireResult,
   HlsRequestReleaseInput,
   normalizeOverlayUrl,
+  normalizeOverlayScale,
 } from 'streamwall-shared'
 
 const SCAN_THROTTLE = 500
@@ -41,7 +42,7 @@ document.addEventListener('DOMContentLoaded', applySpotlightBlur, { once: true }
 let spotlightControls: HTMLDivElement | undefined
 let spotlightOverlay: HTMLIFrameElement | undefined
 ipcRenderer.on('spotlight-controls', (_event, payload: {
-  label?: string; labelPosition?: string; fontSize?: number; overlayUrl?: string
+  label?: string; labelPosition?: string; fontSize?: number; overlayUrl?: string; overlayScale?: number
 }) => {
   if (!document.documentElement) return
   if (!spotlightControls) {
@@ -52,6 +53,8 @@ ipcRenderer.on('spotlight-controls', (_event, payload: {
           inset: 0 !important; width: 100vw !important; height: 100vh !important;
           border: none !important; background: transparent !important;
           z-index: 2147483646 !important; pointer-events: none !important;
+          transform: scale(var(--sw-overlay-scale, 1)) !important;
+          transform-origin: center center !important;
         }
         #streamwall-spotlight-controls {
           display: block !important; position: fixed !important;
@@ -114,6 +117,7 @@ ipcRenderer.on('spotlight-controls', (_event, payload: {
     }
     // State broadcasts must not reload graphics or restart their animations.
     if (spotlightOverlay.src !== overlayUrl) spotlightOverlay.src = overlayUrl
+    spotlightOverlay.style.setProperty('--sw-overlay-scale', String(normalizeOverlayScale(payload.overlayScale) / 100))
   }
 })
 

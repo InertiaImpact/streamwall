@@ -1579,6 +1579,7 @@ export default class StreamWindow extends EventEmitter<StreamWindowEventMap> {
       labelPosition: stream?.labelPosition ?? 'top-left',
       fontSize: state?.overlayLabelFontSize ?? 16,
       overlayUrl: stream?.overlayUrl,
+      overlayScale: stream?.overlayScale,
     })
   }
 

@@ -6,6 +6,7 @@ export interface StreamwallStoredData {
   stateDoc: string
   localStreamData: StreamDataContent[]
   streamOverlayUrls?: Record<string, string>
+  streamOverlayScales?: Record<string, number>
   savedLayouts: Record<
     string,
     {

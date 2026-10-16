@@ -45,6 +45,7 @@ import {
   StreamWindowConfig,
   ViewState,
   normalizeOverlayUrl,
+  normalizeOverlayScale,
 } from 'streamwall-shared'
 import { createGlobalStyle, styled } from 'styled-components'
 import { matchesState } from 'xstate'
@@ -2371,7 +2372,7 @@ export function ControlUI({
               {roleCan(role, 'set-stream-overlay') && (
                 <TileOverlaySettings
                   streams={streams}
-                  onSave={(streamId, overlayUrl) => send({ type: 'set-stream-overlay', streamId, overlayUrl })}
+                  onSave={(streamId, overlayUrl, overlayScale) => send({ type: 'set-stream-overlay', streamId, overlayUrl, overlayScale })}
                 />
               )}
               {roleCan(role, 'update-custom-stream') &&
@@ -3526,16 +3527,28 @@ function LayoutSlot({
 
 function TileOverlaySettings({ streams, onSave }: {
   streams: StreamData[]
-  onSave: (streamId: string, overlayUrl: string) => void
+  onSave: (streamId: string, overlayUrl: string, overlayScale: number) => void
 }) {
   const [streamId, setStreamId] = useState('')
   const [draft, setDraft] = useState('')
+  const [scale, setScale] = useState(100)
+  const [search, setSearch] = useState('')
   const [error, setError] = useState('')
   const selected = streams.find((stream) => stream._id === streamId)
+  const matchingStreams = useMemo(() => {
+    const terms = search.toLowerCase().trim().split(/\s+/).filter(Boolean)
+    return streams.filter((stream) => {
+      if (['overlay', 'background'].includes(stream.kind)) return false
+      const text = [stream._id, stream.label, stream.source, stream.city, stream.state, stream.link]
+        .filter(Boolean).join(' ').toLowerCase()
+      return terms.every((term) => text.includes(term))
+    })
+  }, [streams, search])
   useEffect(() => {
     setDraft(selected?.overlayUrl ?? '')
+    setScale(normalizeOverlayScale(selected?.overlayScale))
     setError('')
-  }, [streamId, selected?.overlayUrl])
+  }, [streamId, selected?.overlayUrl, selected?.overlayScale])
   return <section>
     <h2>Tile HTML overlay</h2>
     <p>Add transparent web graphics over a stream, including its enlarged view.</p>
@@ -3548,26 +3561,45 @@ function TileOverlaySettings({ streams, onSave }: {
         return
       }
       setError('')
-      onSave(streamId, url ?? '')
+      onSave(streamId, url ?? '', scale)
     }} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <input type="search" aria-label="Search streams for HTML overlay"
+        placeholder="Search streams…" value={search}
+        onInput={(event) => setSearch(event.currentTarget.value)} />
       <select aria-label="Stream for HTML overlay" value={streamId}
         onChange={(event) => setStreamId(event.currentTarget.value)}>
         <option value="">Choose stream…</option>
-        {streams.filter((stream) => !['overlay', 'background'].includes(stream.kind)).map((stream) =>
+        {selected && !matchingStreams.includes(selected) && (
+          <option value={selected._id}>{selected._id} — {selected.label || selected.source || selected.link} (selected)</option>
+        )}
+        {matchingStreams.map((stream) =>
           <option key={stream._id} value={stream._id}>
             {stream._id} — {stream.label || stream.source || stream.link}
           </option>)}
       </select>
+      <span role="status">{matchingStreams.length} matching streams</span>
       <input aria-label="HTML overlay URL" type="url" value={draft}
         disabled={!selected} placeholder="https://… (blank to remove)"
         onInput={(event) => setDraft(event.currentTarget.value)}
         style={{ minWidth: 280, flex: 1 }} />
+      <div role="group" aria-label="Overlay scale" style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+        <button type="button" disabled={!selected || scale <= 10}
+          aria-label="Shrink overlay by 5 percent" onClick={() => setScale(normalizeOverlayScale(scale - 5))}>−5%</button>
+        <label>Scale <input type="number" min={10} max={300} step={1}
+          aria-label="Overlay scale percent" value={scale} disabled={!selected}
+          onChange={(event) => setScale(normalizeOverlayScale(event.currentTarget.valueAsNumber))}
+          style={{ width: 65 }} />%</label>
+        <button type="button" disabled={!selected || scale >= 300}
+          aria-label="Enlarge overlay by 5 percent" onClick={() => setScale(normalizeOverlayScale(scale + 5))}>+5%</button>
+        <button type="button" disabled={!selected || scale === 100}
+          onClick={() => setScale(100)}>Reset 100%</button>
+      </div>
       <button type="submit" disabled={!selected}>Save overlay</button>
       <button type="button" disabled={!selected || !selected.overlayUrl}
-        onClick={() => { setDraft(''); onSave(streamId, '') }}>Remove overlay</button>
+        onClick={() => { setDraft(''); onSave(streamId, '', scale) }}>Remove overlay</button>
     </form>
     {error && <p role="alert">{error}</p>}
-    <p>Saved on this installation. Graphics pages must allow embedding and supply a transparent background.</p>
+    <p>Save overlay to apply URL and scale changes. Scaling is centered and clipped to the tile. Graphics pages must allow embedding and supply a transparent background.</p>
   </section>
 }
 
