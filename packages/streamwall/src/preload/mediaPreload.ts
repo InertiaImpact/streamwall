@@ -6,6 +6,7 @@ import {
   HlsRequestAcquireInput,
   HlsRequestAcquireResult,
   HlsRequestReleaseInput,
+  normalizeOverlayUrl,
 } from 'streamwall-shared'
 
 const SCAN_THROTTLE = 500
@@ -38,13 +39,20 @@ document.addEventListener('DOMContentLoaded', applySpotlightBlur, { once: true }
 // Spotlight lives above the grid's native label surface, so its own title and
 // close target belong inside the enlarged media surface.
 let spotlightControls: HTMLDivElement | undefined
+let spotlightOverlay: HTMLIFrameElement | undefined
 ipcRenderer.on('spotlight-controls', (_event, payload: {
-  label?: string; labelPosition?: string; fontSize?: number
+  label?: string; labelPosition?: string; fontSize?: number; overlayUrl?: string
 }) => {
   if (!document.documentElement) return
   if (!spotlightControls) {
     try {
       webFrame.insertCSS(`
+        #streamwall-tile-overlay {
+          display: block !important; position: fixed !important;
+          inset: 0 !important; width: 100vw !important; height: 100vh !important;
+          border: none !important; background: transparent !important;
+          z-index: 2147483646 !important; pointer-events: none !important;
+        }
         #streamwall-spotlight-controls {
           display: block !important; position: fixed !important;
           inset: 0 !important; z-index: 2147483647 !important;
@@ -89,6 +97,24 @@ ipcRenderer.on('spotlight-controls', (_event, payload: {
   const fontSize = typeof payload.fontSize === 'number' && Number.isFinite(payload.fontSize)
     ? Math.min(96, Math.max(8, payload.fontSize)) : 16
   spotlightControls.style.setProperty('--sw-title-size', `${fontSize}px`)
+  const overlayUrl = normalizeOverlayUrl(payload.overlayUrl)
+  if (!overlayUrl) {
+    spotlightOverlay?.remove()
+    spotlightOverlay = undefined
+  } else {
+    if (!spotlightOverlay) {
+      spotlightOverlay = document.createElement('iframe')
+      spotlightOverlay.id = 'streamwall-tile-overlay'
+      spotlightOverlay.title = 'Tile HTML overlay'
+      spotlightOverlay.sandbox.add('allow-scripts', 'allow-same-origin')
+      spotlightOverlay.allow = 'autoplay'
+      spotlightOverlay.referrerPolicy = 'no-referrer'
+      spotlightOverlay.tabIndex = -1
+      document.documentElement.appendChild(spotlightOverlay)
+    }
+    // State broadcasts must not reload graphics or restart their animations.
+    if (spotlightOverlay.src !== overlayUrl) spotlightOverlay.src = overlayUrl
+  }
 })
 
 if (isLocalHlsPlayer) {

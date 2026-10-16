@@ -17,6 +17,7 @@ const operatorActions = [
   'update-custom-stream',
   'delete-custom-stream',
   'rotate-stream',
+  'set-stream-overlay',
   'reload-view',
   'refresh-all-views',
   'refresh-errored-views',

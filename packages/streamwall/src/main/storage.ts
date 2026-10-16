@@ -5,6 +5,7 @@ import { StreamDataContent } from 'streamwall-shared'
 export interface StreamwallStoredData {
   stateDoc: string
   localStreamData: StreamDataContent[]
+  streamOverlayUrls?: Record<string, string>
   savedLayouts: Record<
     string,
     {

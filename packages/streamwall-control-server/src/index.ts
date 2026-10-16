@@ -440,11 +440,11 @@ async function initApp({ baseURL, clientStaticPath }: AppOptions) {
 
         try {
           if (
-            msg.type === 'get-debug-logs' &&
-            !roleCan(identity.role, 'get-debug-logs')
+            (msg.type === 'get-debug-logs' || msg.type === 'set-stream-overlay') &&
+            !roleCan(identity.role, msg.type)
           ) {
             console.warn(
-              `Unauthorized attempt to read debug logs by "${identity.name}"`,
+              `Unauthorized attempt to "${msg.type}" by "${identity.name}"`,
             )
             respond({ error: 'unauthorized' })
             return

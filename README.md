@@ -97,6 +97,35 @@ view closes. H.264 video is copied without re-encoding; other video codecs are
 converted to H.264 for the built-in HLS player. The Windows installer includes
 FFmpeg, so no separate command or service is needed.
 
+### Transparent tile HTML overlays
+
+Use **Tile HTML overlay** in the control window or web interface. Choose a stream,
+paste the graphics page's HTTP(S) URL, and select **Save overlay**. **Remove overlay**
+disables it. The setting is saved on this installation and follows the stream
+across grid positions and enlarged views. Streams with the same URL and crop share
+the setting. Only displayed streams load graphics; ordinary state updates do not
+reload them. Existing full-window `kind = "overlay"` sources remain supported.
+
+To define an overlay alongside a source in `streams.toml`:
+
+```toml
+[[streams]]
+kind = "video"
+label = "Camera with graphics"
+link = "https://example.com/live.m3u8"
+overlayUrl = "https://example.com/graphics/live"
+```
+
+Control interface settings override the TOML value for that URL and crop, including
+an explicit removal. These settings live in the application's saved data; exporting
+`streams.toml` exports the source file, so copy `overlayUrl` there when transferring
+the configuration to another installation.
+
+The page fills the tile and receives its current viewport size. Use responsive
+graphics with a transparent HTML/canvas background. Overlays are visual only:
+clicks continue to operate the tile and enlarged view. Embedding restrictions set
+by the graphics provider (or by a third-party web stream page) still apply.
+
 ## Hotkeys
 
 The following hotkeys are available with the "control" webpage focused:

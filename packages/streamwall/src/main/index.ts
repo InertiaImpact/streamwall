@@ -14,6 +14,8 @@ import {
   ControlResponseMessage,
   StreamwallState,
   ViewState,
+  normalizeOverlayUrl,
+  streamOverlayKey,
 } from 'streamwall-shared'
 import { updateElectronApp } from 'update-electron-app'
 import WebSocket from 'ws'
@@ -1370,6 +1372,34 @@ async function main(argv: ReturnType<typeof parseArgs>) {
           rotation: msg.rotation,
         })
         break
+      case 'set-stream-overlay': {
+        const target = clientState.streams.byId?.get(msg.streamId)
+        if (!target) throw new Error('Stream no longer exists')
+        const overlayUrl = normalizeOverlayUrl(msg.overlayUrl)
+        if (msg.overlayUrl.trim() && !overlayUrl) {
+          throw new Error('Overlay URL must start with http:// or https://')
+        }
+        const key = streamOverlayKey(target)
+        await db.update((data) => {
+          data.streamOverlayUrls ??= {}
+          data.streamOverlayUrls[key] = overlayUrl ?? ''
+        })
+        // Update every matching assignment without navigating its media player.
+        const streams = clientState.streams.map((stream) => streamOverlayKey(stream) === key
+          ? { ...stream, overlayUrl: overlayUrl ?? '' } : stream)
+        Object.assign(streams, {
+          byId: new Map(streams.map((stream) => [stream._id, stream])),
+        })
+        const byURL = new Map<string, typeof streams>()
+        for (const stream of streams) {
+          const entries = byURL.get(stream.link) ?? []
+          entries.push(stream)
+          byURL.set(stream.link, entries)
+        }
+        Object.assign(streams, { byURL })
+        updateState({ streams })
+        break
+      }
       case 'update-custom-stream':
         console.debug('Updating custom stream:', msg.url)
         localStreamData.update(msg.url, msg.data)
@@ -2019,6 +2049,9 @@ async function main(argv: ReturnType<typeof parseArgs>) {
 
   console.log('[main] entering data loop')
   for await (const streams of combineDataSources(dataSources, idGen)) {
+    for (const stream of streams) {
+      stream.overlayUrl = db.data.streamOverlayUrls?.[streamOverlayKey(stream)] ?? stream.overlayUrl
+    }
     updateState({ streams })
     for (const grid of gridRuntimes) {
       updateViewsFromStateDocForGrid(grid.id)

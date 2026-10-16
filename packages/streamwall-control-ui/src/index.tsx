@@ -44,6 +44,7 @@ import {
   StreamwallState,
   StreamWindowConfig,
   ViewState,
+  normalizeOverlayUrl,
 } from 'streamwall-shared'
 import { createGlobalStyle, styled } from 'styled-components'
 import { matchesState } from 'xstate'
@@ -2367,6 +2368,12 @@ export function ControlUI({
               </div>
               
               {/* Custom Streams section */}
+              {roleCan(role, 'set-stream-overlay') && (
+                <TileOverlaySettings
+                  streams={streams}
+                  onSave={(streamId, overlayUrl) => send({ type: 'set-stream-overlay', streamId, overlayUrl })}
+                />
+              )}
               {roleCan(role, 'update-custom-stream') &&
                 roleCan(role, 'delete-custom-stream') && (
                   <>
@@ -2388,12 +2395,10 @@ export function ControlUI({
                       </button>
                     </div>
                     <div>
-                      {customStreams.map(({ link, label, kind }, idx) => (
+                      {customStreams.map(({ _id, _dataSource, ...data }, idx) => (
                         <CustomStreamInput
                           key={idx}
-                          link={link}
-                          label={label}
-                          kind={kind}
+                          {...data}
                           onChange={handleChangeCustomStream}
                           onDelete={handleDeleteCustomStream}
                         />
@@ -3517,6 +3522,53 @@ function LayoutSlot({
       </div>
     </StyledLayoutSlot>
   )
+}
+
+function TileOverlaySettings({ streams, onSave }: {
+  streams: StreamData[]
+  onSave: (streamId: string, overlayUrl: string) => void
+}) {
+  const [streamId, setStreamId] = useState('')
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState('')
+  const selected = streams.find((stream) => stream._id === streamId)
+  useEffect(() => {
+    setDraft(selected?.overlayUrl ?? '')
+    setError('')
+  }, [streamId, selected?.overlayUrl])
+  return <section>
+    <h2>Tile HTML overlay</h2>
+    <p>Add transparent web graphics over a stream, including its enlarged view.</p>
+    <form onSubmit={(event) => {
+      event.preventDefault()
+      if (!selected) return
+      const url = normalizeOverlayUrl(draft)
+      if (draft.trim() && !url) {
+        setError('Enter a complete http:// or https:// URL.')
+        return
+      }
+      setError('')
+      onSave(streamId, url ?? '')
+    }} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <select aria-label="Stream for HTML overlay" value={streamId}
+        onChange={(event) => setStreamId(event.currentTarget.value)}>
+        <option value="">Choose stream…</option>
+        {streams.filter((stream) => !['overlay', 'background'].includes(stream.kind)).map((stream) =>
+          <option key={stream._id} value={stream._id}>
+            {stream._id} — {stream.label || stream.source || stream.link}
+          </option>)}
+      </select>
+      <input aria-label="HTML overlay URL" type="url" value={draft}
+        disabled={!selected} placeholder="https://… (blank to remove)"
+        onInput={(event) => setDraft(event.currentTarget.value)}
+        style={{ minWidth: 280, flex: 1 }} />
+      <button type="submit" disabled={!selected}>Save overlay</button>
+      <button type="button" disabled={!selected || !selected.overlayUrl}
+        onClick={() => { setDraft(''); onSave(streamId, '') }}>Remove overlay</button>
+    </form>
+    {error && <p role="alert">{error}</p>}
+    <p>Saved on this installation. Graphics pages must allow embedding and supply a transparent background.</p>
+  </section>
 }
 
 function CustomStreamInput({

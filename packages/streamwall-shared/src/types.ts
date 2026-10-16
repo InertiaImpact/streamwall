@@ -37,6 +37,8 @@ export interface StreamDataContent extends ContentDisplayOptions {
   kind: ContentKind
   link: string
   label?: string
+  /** Transparent HTML graphics composited over this stream. HTTP(S) only. */
+  overlayUrl?: string
   labelPosition?: 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left'
   source?: string
   notes?: string
@@ -170,6 +172,7 @@ export type ControlCommand =
     }
   | { type: 'set-view-blurred'; viewIdx: number; blurred: boolean; gridId?: string }
   | { type: 'rotate-stream'; url: string; rotation: number }
+  | { type: 'set-stream-overlay'; streamId: string; overlayUrl: string }
   | { type: 'update-custom-stream'; url: string; data: LocalStreamData }
   | { type: 'delete-custom-stream'; url: string }
   | { type: 'reload-view'; viewIdx: number; gridId?: string }

@@ -11,7 +11,7 @@ import {
   FaYoutube,
 } from 'react-icons/fa'
 import { RiKickFill, RiTwitterXFill } from 'react-icons/ri'
-import { StreamwallState } from 'streamwall-shared'
+import { StreamwallState, normalizeOverlayUrl } from 'streamwall-shared'
 import { keyframes, styled } from 'styled-components'
 import { TailSpin } from 'svg-loaders-react'
 import { matchesState } from 'xstate'
@@ -152,6 +152,17 @@ function Overlay({
               onClick={() => toggleSpotlight(content.streamId, content.url)}
               style={{ cursor: 'pointer' }}
             >
+              {normalizeOverlayUrl(data?.overlayUrl) && (
+                <TileOverlay
+                  src={normalizeOverlayUrl(data?.overlayUrl)}
+                  title="Tile HTML overlay"
+                  sandbox="allow-scripts allow-same-origin"
+                  allow="autoplay"
+                  referrerPolicy="no-referrer"
+                  tabIndex={-1}
+                  style={{ filter: isObscured || isBlurred ? 'blur(15px)' : undefined }}
+                />
+              )}
               {!isObscured && isBlurred && <BlurCover />}
               {!isObscured && hasTitle && (
                 <StreamTitle
@@ -515,6 +526,17 @@ const OverlayIFrame = styled.iframe`
   height: 100vh;
   border: none;
   pointer-events: none;
+`
+
+const TileOverlay = styled.iframe`
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: transparent;
+  pointer-events: none;
+  z-index: -1;
 `
 
 render(<App />, document.body)
