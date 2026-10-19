@@ -35,6 +35,7 @@ import {
 import { loadStorage } from './storage'
 import LocationFallbackController from './LocationFallbackController'
 import { applyStreamwallRuntimeTuning } from './runtimeTuning'
+import { configureWindowsIdentity } from './windowsIdentity'
 import StreamdelayClient from './StreamdelayClient'
 import StreamWindow from './StreamWindow'
 import TwitchBot from './TwitchBot'
@@ -2146,10 +2147,11 @@ function init() {
     })
 }
 
-// Handle creating/removing shortcuts on Windows when installing/uninstalling.
-if (started) {
-  app.quit()
-}
+configureWindowsIdentity()
 
-console.debug('Starting Streamwall...')
-init()
+// The Squirrel helper quits after shortcut creation/removal finishes. Installer
+// events must not also launch the normal app or quit before that work completes.
+if (!started) {
+  console.debug('Starting Streamwall...')
+  init()
+}

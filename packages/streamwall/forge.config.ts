@@ -39,16 +39,22 @@ function windowsFfmpegResources() {
 const config: ForgeConfig = {
   packagerConfig: {
     executableName: 'streamwall',
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'streamwall.ico') : undefined,
     asar: true,
     extraResource: [
       // Bundle the control client static files so the built app can serve them
       '../streamwall-control-client/dist',
+      path.join(__dirname, 'assets', 'streamwall.ico'),
       ...windowsFfmpegResources(),
     ],
   },
   rebuildConfig: {},
   makers: [
-    new MakerSquirrel({}),
+    new MakerSquirrel({
+      name: 'streamwall',
+      setupIcon: path.join(__dirname, 'assets', 'streamwall.ico'),
+      iconUrl: 'https://raw.githubusercontent.com/InertiaImpact/streamwall/performance-updates/packages/streamwall/assets/streamwall.ico',
+    }),
     new MakerZIP({}, ['darwin']),
     new MakerRpm({}),
     new MakerDeb({}),
